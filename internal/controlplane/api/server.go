@@ -75,8 +75,13 @@ func (a *App) registerRoutes() {
 	a.mux.Handle("POST /tenants/{tenantID}/enrollment-tokens", a.apiKeyAuth(http.HandlerFunc(a.handleIssueEnrollmentToken)))
 
 	a.mux.HandleFunc("POST /enroll", a.handleEnroll)
+	a.mux.HandleFunc("POST /v1/enroll", a.handleEnroll)
 	a.mux.Handle("POST /agents/heartbeat", a.agentMTLSAuth(http.HandlerFunc(a.handleHeartbeat)))
+	a.mux.Handle("POST /v1/heartbeat", a.agentMTLSAuth(http.HandlerFunc(a.handleHeartbeat)))
 	a.mux.Handle("POST /agents/logs", a.agentMTLSAuth(http.HandlerFunc(a.handleIngestLogs)))
+	a.mux.Handle("POST /v1/logs", a.agentMTLSAuth(http.HandlerFunc(a.handleIngestLogFrame)))
+	a.mux.Handle("GET /v1/plans/next", a.agentMTLSAuth(http.HandlerFunc(a.handleListPendingPlansV1)))
+	a.mux.Handle("POST /v1/executions/result", a.agentMTLSAuth(http.HandlerFunc(a.handleReportPlanResultV1)))
 
 	a.mux.Handle("POST /sites/{siteID}/plans", a.apiKeyAuth(http.HandlerFunc(a.handleApplyPlan)))
 	a.mux.Handle("GET /sites/{siteID}/hosts", a.apiKeyAuth(http.HandlerFunc(a.handleListHosts)))
@@ -370,20 +375,24 @@ func (a *App) handleIssueEnrollmentToken(w http.ResponseWriter, r *http.Request)
 
 func (a *App) handleEnroll(w http.ResponseWriter, r *http.Request) {
 	type request struct {
-		EnrollmentToken string `json:"enrollment_token"`
-		AgentVersion    string `json:"agent_version"`
-		Hostname        string `json:"hostname"`
-		OS              string `json:"os"`
-		Arch            string `json:"arch"`
-		KernelVersion   string `json:"kernel_version"`
-		CSRPEM          string `json:"csr_pem"`
+		EnrollmentToken   string            `json:"enrollment_token"`
+		AgentVersion      string            `json:"agent_version"`
+		Hostname          string            `json:"hostname"`
+		RequestedHostname string            `json:"requested_hostname"`
+		OS                string            `json:"os"`
+		Arch              string            `json:"arch"`
+		KernelVersion     string            `json:"kernel_version"`
+		CSRPEM            string            `json:"csr_pem"`
+		Labels            map[string]string `json:"labels"`
+		BootstrapNonce    string            `json:"bootstrap_nonce"`
 	}
 	var req request
 	if err := decodeJSON(r.Body, &req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if req.EnrollmentToken == "" || req.CSRPEM == "" || req.Hostname == "" {
+	hostname := firstNonEmpty(req.Hostname, req.RequestedHostname)
+	if req.EnrollmentToken == "" || req.CSRPEM == "" || hostname == "" {
 		writeError(w, http.StatusBadRequest, "enrollment_token, hostname and csr_pem are required")
 		return
 	}
@@ -418,7 +427,7 @@ func (a *App) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		OS:               valueOr(req.OS, "linux"),
 		Arch:             valueOr(req.Arch, "amd64"),
 		KernelVersion:    req.KernelVersion,
-	}, req.Hostname)
+	}, hostname)
 	if err != nil {
 		if errors.Is(err, store.ErrConflict) {
 			writeError(w, http.StatusConflict, "agent already exists for host")
@@ -429,35 +438,67 @@ func (a *App) handleEnroll(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = a.repo.WriteAudit(r.Context(), agent.TenantID, agent.SiteID, "AGENT", agent.ID, "agent.enroll", "agent", agent.ID, requestID(r), sourceIP(r), nil)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"tenant_id":              agent.TenantID,
-		"site_id":                agent.SiteID,
-		"host_id":                agent.HostID,
-		"agent_id":               agent.ID,
-		"client_certificate_pem": string(certPEM),
-		"ca_certificate_pem":     string(a.ca.CertPEM()),
-		"refresh_token":          refreshToken,
-		"heartbeat_endpoint":     "/agents/heartbeat",
-		"heartbeat_interval_sec": 15,
+		"tenant_id":                  agent.TenantID,
+		"site_id":                    agent.SiteID,
+		"host_id":                    agent.HostID,
+		"agent_id":                   agent.ID,
+		"client_certificate_pem":     string(certPEM),
+		"ca_certificate_pem":         string(a.ca.CertPEM()),
+		"refresh_token":              refreshToken,
+		"heartbeat_endpoint":         "/agents/heartbeat",
+		"heartbeat_interval_sec":     15,
+		"heartbeat_interval_seconds": 15,
 	})
 }
 
 func (a *App) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	agent := r.Context().Value(ctxAgent{}).(store.Agent)
+	type hostFacts struct {
+		CPUCores    int   `json:"cpu_cores"`
+		MemoryTotal int64 `json:"memory_total_bytes"`
+		Disks       []struct {
+			Mountpoint string `json:"mountpoint"`
+			TotalBytes int64  `json:"total_bytes"`
+			FreeBytes  int64  `json:"free_bytes"`
+		} `json:"disks"`
+		OS     string `json:"os"`
+		Arch   string `json:"arch"`
+		Kernel string `json:"kernel"`
+		KVM    struct {
+			Present  bool `json:"present"`
+			Readable bool `json:"readable"`
+			Writable bool `json:"writable"`
+		} `json:"kvm"`
+	}
+	type vmCompat struct {
+		ID         string    `json:"id"`
+		Name       string    `json:"name"`
+		State      string    `json:"state"`
+		Status     string    `json:"status"`
+		VCPUCount  int       `json:"vcpu_count"`
+		MemoryMiB  int64     `json:"memory_mib"`
+		KernelPath string    `json:"kernel_path"`
+		RootfsPath string    `json:"rootfs_path"`
+		TapIface   string    `json:"tap_iface"`
+		CHPID      int       `json:"ch_pid"`
+		UpdatedAt  time.Time `json:"updated_at"`
+	}
 	type request struct {
-		AgentID                  string                   `json:"agent_id"`
-		HeartbeatSeq             int64                    `json:"heartbeat_seq"`
-		AgentVersion             string                   `json:"agent_version"`
-		OS                       string                   `json:"os"`
-		Arch                     string                   `json:"arch"`
-		KernelVersion            string                   `json:"kernel_version"`
-		Hostname                 string                   `json:"hostname"`
-		CPUCoresTotal            int                      `json:"cpu_cores_total"`
-		MemoryBytesTotal         int64                    `json:"memory_bytes_total"`
-		StorageBytesTotal        int64                    `json:"storage_bytes_total"`
-		KVMAvailable             bool                     `json:"kvm_available"`
-		CloudHypervisorAvailable bool                     `json:"cloud_hypervisor_available"`
-		MicroVMs                 []store.MicroVMHeartbeat `json:"microvms"`
-		ExecutionUpdates         []store.ExecutionUpdate  `json:"execution_updates"`
+		AgentID                  string                  `json:"agent_id"`
+		HeartbeatSeq             int64                   `json:"heartbeat_seq"`
+		AgentVersion             string                  `json:"agent_version"`
+		OS                       string                  `json:"os"`
+		Arch                     string                  `json:"arch"`
+		KernelVersion            string                  `json:"kernel_version"`
+		Hostname                 string                  `json:"hostname"`
+		CPUCoresTotal            int                     `json:"cpu_cores_total"`
+		MemoryBytesTotal         int64                   `json:"memory_bytes_total"`
+		StorageBytesTotal        int64                   `json:"storage_bytes_total"`
+		KVMAvailable             bool                    `json:"kvm_available"`
+		CloudHypervisorAvailable bool                    `json:"cloud_hypervisor_available"`
+		MicroVMs                 []vmCompat              `json:"microvms"`
+		ExecutionUpdates         []store.ExecutionUpdate `json:"execution_updates"`
+		HostFacts                hostFacts               `json:"host_facts"`
 	}
 	var req request
 	if err := decodeJSON(r.Body, &req); err != nil {
@@ -468,8 +509,62 @@ func (a *App) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "agent_id mismatch")
 		return
 	}
+	if req.CPUCoresTotal == 0 && req.HostFacts.CPUCores > 0 {
+		req.CPUCoresTotal = req.HostFacts.CPUCores
+	}
+	if req.MemoryBytesTotal == 0 && req.HostFacts.MemoryTotal > 0 {
+		req.MemoryBytesTotal = req.HostFacts.MemoryTotal
+	}
+	if req.StorageBytesTotal == 0 && len(req.HostFacts.Disks) > 0 {
+		var sum int64
+		for _, d := range req.HostFacts.Disks {
+			sum += d.TotalBytes
+		}
+		req.StorageBytesTotal = sum
+	}
+	if req.OS == "" {
+		req.OS = req.HostFacts.OS
+	}
+	if req.Arch == "" {
+		req.Arch = req.HostFacts.Arch
+	}
+	if req.KernelVersion == "" {
+		req.KernelVersion = req.HostFacts.Kernel
+	}
+	if !req.KVMAvailable {
+		req.KVMAvailable = req.HostFacts.KVM.Present && req.HostFacts.KVM.Readable && req.HostFacts.KVM.Writable
+	}
+	if !req.CloudHypervisorAvailable {
+		req.CloudHypervisorAvailable = req.KVMAvailable
+	}
 	if req.Hostname == "" {
 		req.Hostname = "unknown"
+	}
+	vms := make([]store.MicroVMHeartbeat, 0, len(req.MicroVMs))
+	for _, vm := range req.MicroVMs {
+		if strings.TrimSpace(vm.ID) == "" {
+			continue
+		}
+		state := firstNonEmpty(vm.State, vm.Status)
+		if state == "" {
+			state = "CREATING"
+		}
+		vcpu := vm.VCPUCount
+		if vcpu <= 0 {
+			vcpu = 1
+		}
+		mem := vm.MemoryMiB
+		if mem <= 0 {
+			mem = 256
+		}
+		vms = append(vms, store.MicroVMHeartbeat{
+			ID:        vm.ID,
+			Name:      firstNonEmpty(vm.Name, vm.ID),
+			State:     state,
+			VCPUCount: vcpu,
+			MemoryMiB: mem,
+			UpdatedAt: vm.UpdatedAt,
+		})
 	}
 	err := a.repo.IngestHeartbeat(r.Context(), store.Heartbeat{
 		AgentID:                  agent.ID,
@@ -484,7 +579,7 @@ func (a *App) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		StorageBytesTotal:        req.StorageBytesTotal,
 		KVMAvailable:             req.KVMAvailable,
 		CloudHypervisorAvailable: req.CloudHypervisorAvailable,
-		MicroVMs:                 req.MicroVMs,
+		MicroVMs:                 vms,
 		ExecutionUpdates:         req.ExecutionUpdates,
 	})
 	if err != nil {
@@ -492,6 +587,55 @@ func (a *App) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"next_heartbeat_seconds": 15, "pending_plans": []any{}})
+}
+
+func (a *App) handleIngestLogFrame(w http.ResponseWriter, r *http.Request) {
+	agent := r.Context().Value(ctxAgent{}).(store.Agent)
+	type request struct {
+		ExecutionID string    `json:"execution_id"`
+		Sequence    int64     `json:"sequence"`
+		Level       string    `json:"level"`
+		Message     string    `json:"message"`
+		EmittedAt   time.Time `json:"emitted_at"`
+	}
+	var req request
+	if err := decodeJSON(r.Body, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if strings.TrimSpace(req.ExecutionID) == "" {
+		writeError(w, http.StatusBadRequest, "execution_id required")
+		return
+	}
+	if req.Sequence <= 0 {
+		req.Sequence = time.Now().UTC().UnixNano()
+	}
+	if req.EmittedAt.IsZero() {
+		req.EmittedAt = time.Now().UTC()
+	}
+	_, _, err := a.repo.IngestLogs(r.Context(), store.LogIngest{
+		AgentID: agent.ID,
+		Entries: []store.LogIngestEntry{{
+			ExecutionID: req.ExecutionID,
+			Sequence:    req.Sequence,
+			Severity:    req.Level,
+			Message:     req.Message,
+			EmittedAt:   req.EmittedAt,
+		}},
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to ingest logs")
+		return
+	}
+	w.WriteHeader(http.StatusAccepted)
+}
+
+func (a *App) handleListPendingPlansV1(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"plans": []any{}})
+}
+
+func (a *App) handleReportPlanResultV1(w http.ResponseWriter, _ *http.Request) {
+	w.WriteHeader(http.StatusAccepted)
 }
 
 func (a *App) handleIngestLogs(w http.ResponseWriter, r *http.Request) {
@@ -686,6 +830,15 @@ func valueOr(v, fallback string) string {
 		return fallback
 	}
 	return v
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 func requestID(r *http.Request) string {

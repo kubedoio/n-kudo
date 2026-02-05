@@ -1,0 +1,40 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Go build / test artifacts
+/bin/
+*.test
+*.out
+*.prof
+coverage.txt
+coverage.out
+profile.out
+
+# Go caches (local dev only)
+.gocache/
+.gomodcache/
+
+# Local env files
+.env
+.env.*
+
+# Docker compose local overrides
+compose.override.yml
+docker-compose.override.yml
+
+# Logs / temp
+*.log
+*.tmp
+/tmp/
+
+# Local demo/runtime artifacts
+.demo/
+*.pid
+
+# Cloud Hypervisor local runtime outputs
+internal/edge/providers/cloudhypervisor/testdata/runtime/

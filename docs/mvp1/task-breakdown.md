@@ -22,14 +22,14 @@ Dependencies:
 
 ## Agent 2: Edge Agent Runtime + Cloud Hypervisor
 Owner scope:
-- Build `nkudo-agent` static binary and systemd service.
+- Build `nkudo-edge` static binary and systemd service.
 - Enrollment client and mTLS credential storage/refresh.
 - Heartbeat loop + host facts collector.
 - Plan executor and Cloud Hypervisor provider (`create/start/stop/delete`).
 - Log streaming client.
 
 Deliverables:
-- `cmd/nkudo-agent` with config and retry/backoff behavior.
+- `cmd/edge` with config and retry/backoff behavior.
 - Local idempotency cache and crash-safe resume.
 - Integration tests against mock Cloud Hypervisor.
 
@@ -79,4 +79,3 @@ Dependencies:
 
 ## MVP critical path
 - Contract freeze -> enrollment end-to-end -> heartbeat/status -> apply plan lifecycle -> integration tests green -> release packaging.
-

@@ -1,5 +1,14 @@
 # Cloud Hypervisor Provider (MVP-1)
 
+## Implementation Paths (Current Layout)
+- Provider interface + implementation:
+  - `internal/edge/providers/cloudhypervisor/api.go`
+  - `internal/edge/providers/cloudhypervisor/provider.go`
+- Provider tests:
+  - `internal/edge/providers/cloudhypervisor/provider_test.go`
+- Agent entrypoint wiring:
+  - `cmd/edge/main.go`
+
 ## Approach
 - MVP-1 provider uses host-installed binaries by default:
   - `cloud-hypervisor`

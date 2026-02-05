@@ -8,6 +8,10 @@
 - Build/release plan: `docs/mvp1/release-plan.md`
 - 4-agent task breakdown: `docs/mvp1/task-breakdown.md`
 - NetBird MVP-1 strategy + runbook: `docs/mvp1/netbird-mvp1.md`
+- Cloud Hypervisor provider API/runtime details: `docs/mvp1/cloudhypervisor-provider.md`
+- Cloud Hypervisor VM spec examples:
+  - `docs/mvp1/examples/cloudhypervisor-vm-spec.json`
+  - `docs/mvp1/examples/cloudhypervisor-vm-spec.yaml`
 
 Notes:
 - API and DB field names are intentionally aligned for direct mapping.

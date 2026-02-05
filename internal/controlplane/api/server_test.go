@@ -53,6 +53,33 @@ func TestEnrollmentHappyPath(t *testing.T) {
 	}
 }
 
+func TestEnrollmentV1RequestedHostname(t *testing.T) {
+	app, repo, _, _, enrollToken := newTestAppWithEnrollmentToken(t)
+
+	csrPEM := makeCSR(t)
+	payload := map[string]any{
+		"enrollment_token":   enrollToken,
+		"requested_hostname": "edge-host-v1",
+		"agent_version":      "0.1.0",
+		"csr_pem":            string(csrPEM),
+		"labels":             map[string]string{"os": "linux", "arch": "amd64"},
+		"bootstrap_nonce":    "nonce-1",
+	}
+	rec := doJSON(t, app.Handler(), "POST", "/v1/enroll", "", payload, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	mustDecode(t, rec.Body.Bytes(), &resp)
+	agentID, _ := resp["agent_id"].(string)
+	if agentID == "" {
+		t.Fatalf("missing agent_id in response: %s", rec.Body.String())
+	}
+	if _, err := repo.GetAgentByID(context.Background(), agentID); err != nil {
+		t.Fatalf("agent not persisted: %v", err)
+	}
+}
+
 func TestHeartbeatIngest(t *testing.T) {
 	app, repo, tenantID, siteID, enrollToken := newTestAppWithEnrollmentToken(t)
 	plainAPIKey := "nk_test_key"
@@ -94,6 +121,70 @@ func TestHeartbeatIngest(t *testing.T) {
 	}
 	if hosts[0].CPUCoresTotal != 8 || !hosts[0].KVMAvailable {
 		t.Fatalf("host facts not ingested: %+v", hosts[0])
+	}
+}
+
+func TestHeartbeatV1HostFactsCompatibility(t *testing.T) {
+	app, repo, tenantID, siteID, enrollToken := newTestAppWithEnrollmentToken(t)
+	plainAPIKey := "nk_test_key"
+	_, err := repo.CreateAPIKey(context.Background(), store.APIKey{ID: uuid.NewString(), TenantID: tenantID, Name: "dashboard", KeyHash: hashString(plainAPIKey)})
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+
+	csrPEM := makeCSR(t)
+	enrollResp := enroll(t, app, enrollToken, csrPEM)
+	agentID := enrollResp["agent_id"].(string)
+	certPEM := enrollResp["client_certificate_pem"].(string)
+	cert := parseCert(t, []byte(certPEM))
+
+	hbPayload := map[string]any{
+		"agent_id": agentID,
+		"host_facts": map[string]any{
+			"cpu_cores":          4,
+			"memory_total_bytes": int64(4 * 1024 * 1024 * 1024),
+			"disks": []map[string]any{
+				{"mountpoint": "/", "total_bytes": int64(80 * 1024 * 1024 * 1024)},
+			},
+			"os":     "linux",
+			"arch":   "amd64",
+			"kernel": "6.8.0",
+			"kvm": map[string]any{
+				"present":  true,
+				"readable": true,
+				"writable": true,
+			},
+		},
+		"microvms": []map[string]any{
+			{
+				"id":         "vm-compat-1",
+				"name":       "vm-compat-1",
+				"status":     "RUNNING",
+				"updated_at": time.Now().UTC().Format(time.RFC3339Nano),
+			},
+		},
+	}
+	rec := doJSON(t, app.Handler(), "POST", "/v1/heartbeat", "", hbPayload, &tls.ConnectionState{PeerCertificates: []*x509.Certificate{cert}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("heartbeat status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	hosts, err := repo.ListHosts(context.Background(), tenantID, siteID)
+	if err != nil {
+		t.Fatalf("list hosts: %v", err)
+	}
+	if len(hosts) != 1 {
+		t.Fatalf("expected 1 host, got %d", len(hosts))
+	}
+	if hosts[0].CPUCoresTotal != 4 {
+		t.Fatalf("host facts not ingested from host_facts payload: %+v", hosts[0])
+	}
+	vms, err := repo.ListVMs(context.Background(), tenantID, siteID)
+	if err != nil {
+		t.Fatalf("list vms: %v", err)
+	}
+	if len(vms) != 1 || vms[0].State != "RUNNING" {
+		t.Fatalf("expected RUNNING vm from compat payload, got: %+v", vms)
 	}
 }
 

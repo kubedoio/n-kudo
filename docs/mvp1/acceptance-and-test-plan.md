@@ -49,7 +49,7 @@ Steps:
 4. Run mock Cloud Hypervisor service (for integration tests):
    - `go test ./tests/integration/mock_cloudhypervisor -run TestServe -v`
 5. Run agent against local control-plane:
-   - `go run ./cmd/nkudo-agent --config ./deployments/dev/agent.yaml`
+   - `go run ./cmd/edge --config ./deployments/dev/agent.yaml`
 6. Trigger enrollment + sample plan via seed script/API client.
 
 ## Test strategy
@@ -89,4 +89,3 @@ Mandatory suites:
 - All mandatory integration suites pass in CI.
 - E2E smoke test passes twice consecutively on a clean environment.
 - No P0/P1 defects open for enrollment, plan execution, or tenant isolation.
-

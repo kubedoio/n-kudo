@@ -1,88 +1,80 @@
 # MVP-1 Repo Layout and Module Boundaries
 
-## Proposed monorepo structure
+## Current monorepo structure
 
 ```text
 n-kudo/
   api/
     proto/controlplane/v1/controlplane.proto
+    openapi/
   cmd/
     control-plane/main.go
-    nkudo-agent/main.go
+    edge/main.go
   internal/
     controlplane/
-      api/                  # gRPC/HTTP handlers, auth middleware, request validation
-      enrollment/           # token validation, cert bootstrap/rotation
-      plans/                # apply-plan logic, scheduler, idempotency checks
-      ingest/               # heartbeat processing, host facts upsert, execution updates
-      status/               # site/host/microvm query composition
-      netbird/              # SaaS-side adapter for NetBird API
-      audit/                # audit event writer
-      tenancy/              # tenant boundary enforcement helpers
-    agent/
-      enroll/               # bootstrap + credential persistence
-      controlclient/        # gRPC client and retry/backoff
-      heartbeat/            # periodic reporting loop
-      facts/                # host inventory collection
-      planner/              # pull pending plans and dispatch operations
-      executor/             # operation execution state machine
-      logs/                 # execution log buffering + streaming
-      store/                # local state (idempotency cache, plan checkpoints)
-      runtime/
-        cloudhypervisor/    # Cloud Hypervisor provider module
-      network/
-        netbird/            # NetBird integration module
-  db/
-    migrations/0001_mvp1.sql
+      api/                  # API handlers + request validation
+      auth/                 # authN/authZ middleware
+      db/                   # persistence adapters + migrations wiring
+      enroll/               # enrollment token and cert bootstrap logic
+      plans/                # plan creation and lifecycle state
+      audit/                # audit event write path
+    edge/
+      enroll/               # enrollment client + identity persistence
+      mtls/                 # key/cert generation + TLS client setup
+      hostfacts/            # host inventory collection
+      executor/             # plan/action execution + idempotency behavior
+      state/                # local state persistence
+      netbird/              # NetBird join/status/probe integration
+      providers/
+        cloudhypervisor/    # Cloud Hypervisor runtime implementation
   deployments/
-    systemd/nkudo-agent.service
-    packaging/
-      Dockerfile.control-plane
-      release-agent.sh
+    docker/
+    systemd/nkudo-edge.service
+  scripts/
+    install-edge.sh
+    dev-up.sh
   tests/
     integration/
-      fixtures/
-      mock_netbird/
-      mock_cloudhypervisor/
-    e2e/
-  docs/mvp1/
-    architecture.md
-    acceptance-and-test-plan.md
-    release-plan.md
-    task-breakdown.md
+  docs/
+    repo-structure.md
+    mvp1/
 ```
 
 ## Module boundaries
 
 - `internal/controlplane/api`
-  - Responsibility: expose APIs; enforce authN/authZ and tenant context; map transport DTOs to domain commands.
-  - No direct DB SQL outside repositories.
+  - Responsibility: public API surface for dashboard/agent interactions.
+  - Must enforce tenant scoping and auth before domain logic.
 
 - `internal/controlplane/plans`
-  - Responsibility: create immutable plan records, validate action sequences, enforce idempotency.
-  - Owns plan state transitions (`PENDING`, `IN_PROGRESS`, `SUCCEEDED`, `FAILED`, `CANCELLED`).
+  - Responsibility: immutable plan records, idempotency (`idempotency_key`), and state transitions.
 
-- `internal/controlplane/ingest`
-  - Responsibility: handle heartbeat upserts and execution status ingestion.
-  - Must be safe for duplicate/out-of-order heartbeats.
+- `internal/controlplane/enroll`
+  - Responsibility: one-time token validation and enrollment response generation.
 
-- `internal/controlplane/netbird`
-  - Responsibility: SaaS-side calls to NetBird API only.
-  - No runtime dependencies from other modules except typed interface.
+- `internal/edge/enroll`
+  - Responsibility: token/CSR enrollment call and secure local identity write.
 
-- `internal/agent/runtime/cloudhypervisor`
-  - Responsibility: local microVM lifecycle implementation via `cloud-hypervisor` process management and config generation.
-  - API surface (for agent executor): `CreateVM`, `StartVM`, `StopVM`, `DeleteVM`, `InspectVM`.
+- `internal/edge/mtls`
+  - Responsibility: cert/key generation, secure PKI file permissions, mTLS client config.
 
-- `internal/agent/network/netbird`
-  - Responsibility: join/check NetBird peer state via local CLI/API integration.
-  - API surface: `JoinPeer`, `PeerStatus`, `ConnectivityCheck`.
+- `internal/edge/hostfacts`
+  - Responsibility: CPU/RAM/disk/OS/kernel/KVM/interface/bridge facts collection.
 
-- `internal/agent/executor`
-  - Responsibility: execute plan operations atomically per VM and emit logs/status.
-  - Depends only on runtime/network interfaces, not concrete implementations.
+- `internal/edge/netbird`
+  - Responsibility: local NetBird status/join/probe checks only.
 
-- `internal/agent/store`
-  - Responsibility: local persistence for dedupe and crash recovery.
-  - Backing store for MVP-1: embedded SQLite file `/var/lib/nkudo/agent.db`.
+- `internal/edge/providers/cloudhypervisor`
+  - Responsibility: microVM create/start/stop/delete operations.
 
+- `internal/edge/executor`
+  - Responsibility: execute plan actions in order with idempotent action replay handling.
+
+- `internal/edge/state`
+  - Responsibility: local state and execution metadata persistence used by executor/provider.
+
+## Placement rules
+
+- Entrypoints live only in `cmd/control-plane` and `cmd/edge`.
+- Runtime business logic lives under `internal/...`.
+- Avoid reintroducing top-level `pkg/` runtime modules.

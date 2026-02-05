@@ -3,15 +3,15 @@
 ## Build artifacts
 
 ### Edge agent (static binary)
-- Target: `nkudo-agent` static Linux binary.
+- Target: `nkudo-edge` static Linux binary.
 - Build flags:
   - `CGO_ENABLED=0`
   - `GOOS=linux`
   - `GOARCH=amd64` and `arm64`
 - Suggested command:
-  - `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o dist/nkudo-agent-linux-amd64 ./cmd/nkudo-agent`
+  - `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o dist/nkudo-edge-linux-amd64 ./cmd/edge`
 - Distribution:
-  - tarball with `nkudo-agent`, sample config, and `systemd` unit.
+  - tarball with `nkudo-edge`, sample config, and `systemd` unit.
   - sha256 checksum + detached signature.
 
 ### Control-plane
@@ -59,7 +59,7 @@
   - DB migrations must be backward-compatible for one minor version.
 - Agent:
   - keep previous binary in `/opt/nkudo/releases/<version>/`.
-  - rollback command: symlink previous binary and `systemctl restart nkudo-agent`.
+  - rollback command: symlink previous binary and `systemctl restart nkudo-edge`.
 - Trigger conditions:
   - >5% plan failure increase
   - enrollment failure >2% absolute increase
@@ -69,4 +69,3 @@
 - Runbook for enrollment failure, netbird join failure, and Cloud Hypervisor command failure.
 - Alerting configured for ingest downtime and tenant isolation violations.
 - Audit log verification in production before enabling customer onboarding.
-

@@ -1,0 +1,25 @@
+{
+  "execution_id": "exec-demo-create-start",
+  "actions": [
+    {
+      "action_id": "create-demo-vm",
+      "type": "MicroVMCreate",
+      "timeout": 60,
+      "params": {
+        "vm_id": "vm-demo-001",
+        "name": "mvp1-demo-vm",
+        "tap_iface": "nkdemo0",
+        "vcpu": 1,
+        "memory_mib": 256
+      }
+    },
+    {
+      "action_id": "start-demo-vm",
+      "type": "MicroVMStart",
+      "timeout": 30,
+      "params": {
+        "vm_id": "vm-demo-001"
+      }
+    }
+  ]
+}

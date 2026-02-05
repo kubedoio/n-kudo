@@ -49,7 +49,7 @@
 
 ## 2) Agent module implementation
 
-Implemented in `n-kudo-edge/edge-network/netbird/netbird.go`:
+Implemented in `internal/edge/netbird/netbird.go`:
 - `Client.Evaluate(ctx, cfg)`:
   - detects netbird CLI
   - optionally installs CLI via configured command
@@ -66,7 +66,7 @@ Implemented in `n-kudo-edge/edge-network/netbird/netbird.go`:
 - `Snapshot.ToControlPlaneStatus()`:
   - returns a normalized payload (`state`, `connected`, `peer_id`, `ipv4`, `network_id`, `reason`) ready for heartbeat serialization
 
-Related tests in `n-kudo-edge/edge-network/netbird/netbird_test.go` cover:
+Related tests in `internal/edge/netbird/netbird_test.go` cover:
 - JSON status parsing variants
 - URL normalization for HTTP probe targets
 - probe type normalization
@@ -169,7 +169,7 @@ netbird status
 
 Approach A (customer-managed NetBird; validation only):
 ```bash
-go run ./cmd/nkudo-edge run \
+go run ./cmd/edge run \
   --control-plane "https://cp.example.com" \
   --netbird-enabled=true \
   --netbird-auto-join=false \
@@ -180,7 +180,7 @@ go run ./cmd/nkudo-edge run \
 Approach B (agent-managed join with setup key):
 ```bash
 export NETBIRD_SETUP_KEY="<NETBIRD_SETUP_KEY>"
-go run ./cmd/nkudo-edge run \
+go run ./cmd/edge run \
   --control-plane "https://cp.example.com" \
   --netbird-enabled=true \
   --netbird-auto-join=true \
