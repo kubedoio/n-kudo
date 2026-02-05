@@ -1,0 +1,15 @@
+{
+  "name": "ubuntu-demo-01",
+  "vcpu": 2,
+  "mem_mb": 1024,
+  "disk_path": "/var/lib/nkudo-edge/images/ubuntu-24.04-server-cloudimg-amd64.img",
+  "cloud_init_iso_path": "",
+  "tap_name": "tap-ubuntu01",
+  "bridge_name": "br0",
+  "mac": "02:00:00:10:00:01",
+  "hostname": "ubuntu-demo-01",
+  "ssh_authorized_keys": [
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEg5examplekey user@example"
+  ],
+  "disk_size_mb": 10240
+}

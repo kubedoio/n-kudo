@@ -1,0 +1,287 @@
+syntax = "proto3";
+
+package nkudo.controlplane.v1;
+
+option go_package = "github.com/n-kudo/n-kudo/api/proto/controlplane/v1;controlplanev1";
+
+import "google/protobuf/timestamp.proto";
+
+service EnrollmentService {
+  rpc Enroll(EnrollRequest) returns (EnrollResponse);
+}
+
+service AgentControlService {
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+  rpc StreamLogs(stream LogFrame) returns (StreamLogsResponse);
+}
+
+service TenantControlService {
+  rpc ApplyPlan(ApplyPlanRequest) returns (ApplyPlanResponse);
+  rpc GetStatus(StatusQueryRequest) returns (StatusQueryResponse);
+}
+
+message EnrollRequest {
+  string enrollment_token = 1;
+  string agent_version = 2;
+  string requested_hostname = 3;
+  HostFingerprint host_fingerprint = 4;
+  string csr_pem = 5;
+  map<string, string> labels = 6;
+  string bootstrap_nonce = 7;
+}
+
+message EnrollResponse {
+  string tenant_id = 1;
+  string site_id = 2;
+  string host_id = 3;
+  string agent_id = 4;
+  string client_certificate_pem = 5;
+  string ca_certificate_pem = 6;
+  string refresh_token = 7;
+  string heartbeat_endpoint = 8;
+  int32 heartbeat_interval_seconds = 9;
+}
+
+message HostFingerprint {
+  string machine_id_sha256 = 1;
+  string bios_uuid_sha256 = 2;
+  string primary_mac_sha256 = 3;
+}
+
+message HeartbeatRequest {
+  string tenant_id = 1;
+  string site_id = 2;
+  string host_id = 3;
+  string agent_id = 4;
+  int64 heartbeat_seq = 5;
+  google.protobuf.Timestamp sent_at = 6;
+  AgentStatus agent_status = 7;
+  HostFacts host_facts = 8;
+  NetBirdPeerStatus netbird_status = 9;
+  repeated MicroVMStatus microvms = 10;
+  repeated ExecutionUpdate execution_updates = 11;
+}
+
+message HeartbeatResponse {
+  int32 next_heartbeat_seconds = 1;
+  repeated Plan pending_plans = 2;
+  bool rotate_certificate = 3;
+}
+
+message AgentStatus {
+  string version = 1;
+  string os = 2;
+  string arch = 3;
+  string kernel_version = 4;
+  AgentLifecycleState state = 5;
+  google.protobuf.Timestamp started_at = 6;
+}
+
+message HostFacts {
+  uint32 cpu_cores_total = 1;
+  uint64 memory_bytes_total = 2;
+  uint64 memory_bytes_free = 3;
+  uint64 storage_bytes_total = 4;
+  uint64 storage_bytes_free = 5;
+  bool kvm_available = 6;
+  bool cloud_hypervisor_available = 7;
+}
+
+message NetBirdPeerStatus {
+  string peer_id = 1;
+  bool connected = 2;
+  string management_url = 3;
+  string network_id = 4;
+  string ipv4 = 5;
+  google.protobuf.Timestamp checked_at = 6;
+}
+
+message ApplyPlanRequest {
+  string site_id = 1;
+  string requested_by_user_id = 2;
+  string idempotency_key = 3;
+  string client_request_id = 4;
+  repeated PlanOperation operations = 5;
+  bool dry_run = 6;
+}
+
+message ApplyPlanResponse {
+  string plan_id = 1;
+  uint64 plan_version = 2;
+  PlanStatus plan_status = 3;
+  bool deduplicated = 4;
+}
+
+message Plan {
+  string plan_id = 1;
+  uint64 plan_version = 2;
+  string site_id = 3;
+  string idempotency_key = 4;
+  repeated PlanOperation operations = 5;
+  google.protobuf.Timestamp created_at = 6;
+}
+
+message PlanOperation {
+  string operation_id = 1;
+  string vm_id = 2;
+  MicroVMOperation operation = 3;
+  CreateMicroVMConfig create_config = 4;
+  uint32 timeout_seconds = 5;
+}
+
+message CreateMicroVMConfig {
+  string name = 1;
+  uint32 vcpu_count = 2;
+  uint64 memory_mib = 3;
+  string kernel_image_path = 4;
+  string rootfs_path = 5;
+  repeated string cmdline_args = 6;
+  repeated string net_ifaces = 7;
+}
+
+message ExecutionUpdate {
+  string execution_id = 1;
+  string plan_id = 2;
+  string operation_id = 3;
+  string vm_id = 4;
+  ExecutionState state = 5;
+  string error_code = 6;
+  string error_message = 7;
+  google.protobuf.Timestamp updated_at = 8;
+}
+
+message StatusQueryRequest {
+  string site_id = 1;
+  repeated string host_ids = 2;
+  repeated string vm_ids = 3;
+  bool include_recent_logs = 4;
+  int32 max_logs_per_execution = 5;
+}
+
+message StatusQueryResponse {
+  SiteStatus site = 1;
+  repeated HostStatus hosts = 2;
+  repeated MicroVMStatus microvms = 3;
+  repeated ExecutionStatus executions = 4;
+  repeated ExecutionLog recent_logs = 5;
+}
+
+message SiteStatus {
+  string site_id = 1;
+  string site_name = 2;
+  SiteConnectivityState connectivity_state = 3;
+  google.protobuf.Timestamp last_heartbeat_at = 4;
+}
+
+message HostStatus {
+  string host_id = 1;
+  string hostname = 2;
+  AgentLifecycleState agent_state = 3;
+  HostFacts capacity = 4;
+  google.protobuf.Timestamp last_heartbeat_at = 5;
+}
+
+message MicroVMStatus {
+  string vm_id = 1;
+  string site_id = 2;
+  string host_id = 3;
+  string name = 4;
+  MicroVMState state = 5;
+  uint32 vcpu_count = 6;
+  uint64 memory_mib = 7;
+  google.protobuf.Timestamp updated_at = 8;
+}
+
+message ExecutionStatus {
+  string execution_id = 1;
+  string plan_id = 2;
+  string operation_id = 3;
+  string vm_id = 4;
+  ExecutionState state = 5;
+  string error_message = 6;
+  google.protobuf.Timestamp updated_at = 7;
+}
+
+message ExecutionLog {
+  string execution_id = 1;
+  uint64 sequence = 2;
+  LogSeverity severity = 3;
+  string message = 4;
+  google.protobuf.Timestamp emitted_at = 5;
+}
+
+message LogFrame {
+  string tenant_id = 1;
+  string site_id = 2;
+  string agent_id = 3;
+  string plan_id = 4;
+  string execution_id = 5;
+  string operation_id = 6;
+  string vm_id = 7;
+  uint64 sequence = 8;
+  LogSeverity severity = 9;
+  string message = 10;
+  google.protobuf.Timestamp emitted_at = 11;
+  bool eof = 12;
+}
+
+message StreamLogsResponse {
+  uint64 accepted_frames = 1;
+  uint64 dropped_frames = 2;
+}
+
+enum AgentLifecycleState {
+  AGENT_LIFECYCLE_STATE_UNSPECIFIED = 0;
+  AGENT_LIFECYCLE_STATE_ONLINE = 1;
+  AGENT_LIFECYCLE_STATE_DEGRADED = 2;
+  AGENT_LIFECYCLE_STATE_OFFLINE = 3;
+}
+
+enum SiteConnectivityState {
+  SITE_CONNECTIVITY_STATE_UNSPECIFIED = 0;
+  SITE_CONNECTIVITY_STATE_ONLINE = 1;
+  SITE_CONNECTIVITY_STATE_PARTIAL = 2;
+  SITE_CONNECTIVITY_STATE_OFFLINE = 3;
+}
+
+enum PlanStatus {
+  PLAN_STATUS_UNSPECIFIED = 0;
+  PLAN_STATUS_PENDING = 1;
+  PLAN_STATUS_IN_PROGRESS = 2;
+  PLAN_STATUS_SUCCEEDED = 3;
+  PLAN_STATUS_FAILED = 4;
+  PLAN_STATUS_CANCELLED = 5;
+}
+
+enum MicroVMOperation {
+  MICRO_VM_OPERATION_UNSPECIFIED = 0;
+  MICRO_VM_OPERATION_CREATE = 1;
+  MICRO_VM_OPERATION_START = 2;
+  MICRO_VM_OPERATION_STOP = 3;
+  MICRO_VM_OPERATION_DELETE = 4;
+}
+
+enum MicroVMState {
+  MICRO_VM_STATE_UNSPECIFIED = 0;
+  MICRO_VM_STATE_CREATING = 1;
+  MICRO_VM_STATE_STOPPED = 2;
+  MICRO_VM_STATE_RUNNING = 3;
+  MICRO_VM_STATE_DELETING = 4;
+  MICRO_VM_STATE_ERROR = 5;
+}
+
+enum ExecutionState {
+  EXECUTION_STATE_UNSPECIFIED = 0;
+  EXECUTION_STATE_PENDING = 1;
+  EXECUTION_STATE_IN_PROGRESS = 2;
+  EXECUTION_STATE_SUCCEEDED = 3;
+  EXECUTION_STATE_FAILED = 4;
+}
+
+enum LogSeverity {
+  LOG_SEVERITY_UNSPECIFIED = 0;
+  LOG_SEVERITY_DEBUG = 1;
+  LOG_SEVERITY_INFO = 2;
+  LOG_SEVERITY_WARN = 3;
+  LOG_SEVERITY_ERROR = 4;
+}

@@ -1,0 +1,50 @@
+# NetBird configuration for nkudo-agent MVP-1.
+# This file is a sample only; wire these fields into your agent config loader.
+
+netbird:
+  # Set false to disable NetBird integration entirely.
+  enabled: true
+
+  # Approach A (customer-managed NetBird):
+  # - auto_join: false
+  # - setup_key: ""
+  # Agent only validates status and probe.
+
+  # Approach B (agent-managed join):
+  # - auto_join: true
+  # - setup_key from env var NETBIRD_SETUP_KEY at runtime
+  # - optional install_command if netbird is not already installed
+  auto_join: false
+  setup_key: ""
+
+  # Hostname to register in NetBird when auto_join is enabled.
+  hostname: "site-a-edge-01"
+
+  # If true, report Degraded when service manager can detect netbird service
+  # and it is not running.
+  require_service: true
+
+  # Optional: command vector to install netbird when CLI is missing.
+  # Leave empty for approach A.
+  # install_command:
+  #   - "bash"
+  #   - "-lc"
+  #   - "curl -fsSL https://pkgs.netbird.io/install.sh | sh"
+
+  # Mesh reachability probe used for network-ready decision.
+  probe:
+    # http or ping
+    type: "http"
+
+    # Known mesh endpoint. For HTTP, both URL and host:port forms are accepted.
+    target: "http://100.90.0.10:8080/readyz"
+
+    # Timeout in Go duration format.
+    timeout: "5s"
+
+    # HTTP response range considered successful.
+    http_status_min: 200
+    http_status_max: 399
+
+    # Optional user-agent override.
+    http_user_agent: "nkudo-agent-netbird-check/0.1"

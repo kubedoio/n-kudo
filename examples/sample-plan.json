@@ -1,0 +1,43 @@
+{
+  "execution_id": "exec-sample-001",
+  "actions": [
+    {
+      "action_id": "create-vm-1",
+      "type": "MicroVMCreate",
+      "timeout": 30,
+      "params": {
+        "vm_id": "vm-1",
+        "name": "demo-vm",
+        "kernel_path": "/var/lib/nkudo-edge/images/vmlinux",
+        "rootfs_path": "/var/lib/nkudo-edge/images/rootfs.ext4",
+        "tap_iface": "tap0",
+        "vcpu": 1,
+        "memory_mib": 256
+      }
+    },
+    {
+      "action_id": "start-vm-1",
+      "type": "MicroVMStart",
+      "timeout": 20,
+      "params": {
+        "vm_id": "vm-1"
+      }
+    },
+    {
+      "action_id": "stop-vm-1",
+      "type": "MicroVMStop",
+      "timeout": 20,
+      "params": {
+        "vm_id": "vm-1"
+      }
+    },
+    {
+      "action_id": "delete-vm-1",
+      "type": "MicroVMDelete",
+      "timeout": 20,
+      "params": {
+        "vm_id": "vm-1"
+      }
+    }
+  ]
+}
