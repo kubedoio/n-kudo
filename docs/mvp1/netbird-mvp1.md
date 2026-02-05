@@ -49,7 +49,7 @@
 
 ## 2) Agent module implementation
 
-Implemented in `pkg/netbird/netbird.go`:
+Implemented in `n-kudo-edge/edge-network/netbird/netbird.go`:
 - `Client.Evaluate(ctx, cfg)`:
   - detects netbird CLI
   - optionally installs CLI via configured command
@@ -66,7 +66,7 @@ Implemented in `pkg/netbird/netbird.go`:
 - `Snapshot.ToControlPlaneStatus()`:
   - returns a normalized payload (`state`, `connected`, `peer_id`, `ipv4`, `network_id`, `reason`) ready for heartbeat serialization
 
-Related tests in `pkg/netbird/netbird_test.go` cover:
+Related tests in `n-kudo-edge/edge-network/netbird/netbird_test.go` cover:
 - JSON status parsing variants
 - URL normalization for HTTP probe targets
 - probe type normalization
@@ -164,3 +164,28 @@ netbird status
 4. Set mesh probe endpoint in agent config (`probe.target`).
 5. Start/restart agent.
 6. Confirm agent reports `Connected` when peer is connected and probe succeeds.
+
+### Exact agent command examples (this repository)
+
+Approach A (customer-managed NetBird; validation only):
+```bash
+go run ./cmd/nkudo-edge run \
+  --control-plane "https://cp.example.com" \
+  --netbird-enabled=true \
+  --netbird-auto-join=false \
+  --netbird-probe-type=http \
+  --netbird-probe-target="http://100.90.0.10:8080/readyz"
+```
+
+Approach B (agent-managed join with setup key):
+```bash
+export NETBIRD_SETUP_KEY="<NETBIRD_SETUP_KEY>"
+go run ./cmd/nkudo-edge run \
+  --control-plane "https://cp.example.com" \
+  --netbird-enabled=true \
+  --netbird-auto-join=true \
+  --netbird-setup-key "$NETBIRD_SETUP_KEY" \
+  --netbird-hostname "site-a-edge-01" \
+  --netbird-probe-type=http \
+  --netbird-probe-target="http://100.90.0.10:8080/readyz"
+```

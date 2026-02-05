@@ -1,5 +1,8 @@
-module github.com/n-kudo/n-kudo-edge
+module github.com/kubedoio/n-kudo
 
-go 1.23
+go 1.23.0
 
-require go.etcd.io/bbolt v1.3.11 // indirect
+require (
+	github.com/google/uuid v1.6.0
+	github.com/lib/pq v1.2.0
+)

@@ -1,0 +1,278 @@
+package controlplane
+
+import (
+	"bytes"
+	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/json"
+	"encoding/pem"
+	"math/big"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/kubedoio/n-kudo/internal/controlplane/db"
+)
+
+func TestEnrollmentHappyPath(t *testing.T) {
+	app, repo, _, _, enrollToken := newTestAppWithEnrollmentToken(t)
+
+	csrPEM := makeCSR(t)
+	payload := map[string]any{
+		"enrollment_token": enrollToken,
+		"hostname":         "edge-host-1",
+		"agent_version":    "0.1.0",
+		"os":               "linux",
+		"arch":             "amd64",
+		"csr_pem":          string(csrPEM),
+	}
+	rec := doJSON(t, app.Handler(), "POST", "/enroll", "", payload, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	mustDecode(t, rec.Body.Bytes(), &resp)
+	agentID, _ := resp["agent_id"].(string)
+	if agentID == "" {
+		t.Fatalf("missing agent_id in response: %s", rec.Body.String())
+	}
+	if _, err := repo.GetAgentByID(context.Background(), agentID); err != nil {
+		t.Fatalf("agent not persisted: %v", err)
+	}
+
+	// one-time token must fail on reuse
+	rec2 := doJSON(t, app.Handler(), "POST", "/enroll", "", payload, nil)
+	if rec2.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 on token reuse, got %d", rec2.Code)
+	}
+}
+
+func TestHeartbeatIngest(t *testing.T) {
+	app, repo, tenantID, siteID, enrollToken := newTestAppWithEnrollmentToken(t)
+	plainAPIKey := "nk_test_key"
+	_, err := repo.CreateAPIKey(context.Background(), store.APIKey{ID: uuid.NewString(), TenantID: tenantID, Name: "dashboard", KeyHash: hashString(plainAPIKey)})
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+
+	csrPEM := makeCSR(t)
+	enrollResp := enroll(t, app, enrollToken, csrPEM)
+	agentID := enrollResp["agent_id"].(string)
+	certPEM := enrollResp["client_certificate_pem"].(string)
+	cert := parseCert(t, []byte(certPEM))
+
+	hbPayload := map[string]any{
+		"agent_id":                   agentID,
+		"heartbeat_seq":              1,
+		"hostname":                   "edge-host-1",
+		"agent_version":              "0.1.0",
+		"os":                         "linux",
+		"arch":                       "amd64",
+		"cpu_cores_total":            8,
+		"memory_bytes_total":         int64(8 * 1024 * 1024 * 1024),
+		"storage_bytes_total":        int64(100 * 1024 * 1024 * 1024),
+		"kvm_available":              true,
+		"cloud_hypervisor_available": true,
+	}
+	rec := doJSON(t, app.Handler(), "POST", "/agents/heartbeat", "", hbPayload, &tls.ConnectionState{PeerCertificates: []*x509.Certificate{cert}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("heartbeat status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	hosts, err := repo.ListHosts(context.Background(), tenantID, siteID)
+	if err != nil {
+		t.Fatalf("list hosts: %v", err)
+	}
+	if len(hosts) != 1 {
+		t.Fatalf("expected 1 host, got %d", len(hosts))
+	}
+	if hosts[0].CPUCoresTotal != 8 || !hosts[0].KVMAvailable {
+		t.Fatalf("host facts not ingested: %+v", hosts[0])
+	}
+}
+
+func TestPlanSubmissionAndLogs(t *testing.T) {
+	app, repo, tenantID, siteID, enrollToken := newTestAppWithEnrollmentToken(t)
+	plainAPIKey := "nk_test_key"
+	_, err := repo.CreateAPIKey(context.Background(), store.APIKey{ID: uuid.NewString(), TenantID: tenantID, Name: "dashboard", KeyHash: hashString(plainAPIKey)})
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+
+	csrPEM := makeCSR(t)
+	enrollResp := enroll(t, app, enrollToken, csrPEM)
+	agentID := enrollResp["agent_id"].(string)
+	certPEM := enrollResp["client_certificate_pem"].(string)
+	cert := parseCert(t, []byte(certPEM))
+
+	planPayload := map[string]any{
+		"idempotency_key": "plan-123",
+		"actions": []map[string]any{
+			{"operation": "CREATE", "name": "vm-1", "vcpu_count": 2, "memory_mib": 512},
+		},
+	}
+	rec := doJSON(t, app.Handler(), "POST", "/sites/"+siteID+"/plans", plainAPIKey, planPayload, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("apply plan status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var planResp struct {
+		Executions []store.Execution `json:"executions"`
+	}
+	mustDecode(t, rec.Body.Bytes(), &planResp)
+	if len(planResp.Executions) != 1 {
+		t.Fatalf("expected 1 execution, got %d", len(planResp.Executions))
+	}
+	execID := planResp.Executions[0].ID
+
+	logsPayload := map[string]any{
+		"agent_id": agentID,
+		"entries": []map[string]any{
+			{"execution_id": execID, "sequence": 1, "severity": "INFO", "message": "start", "emitted_at": time.Now().UTC().Format(time.RFC3339Nano)},
+			{"execution_id": execID, "sequence": 2, "severity": "INFO", "message": "done", "emitted_at": time.Now().UTC().Format(time.RFC3339Nano)},
+			{"execution_id": execID, "sequence": 2, "severity": "INFO", "message": "dup", "emitted_at": time.Now().UTC().Format(time.RFC3339Nano)},
+		},
+	}
+	logRec := doJSON(t, app.Handler(), "POST", "/agents/logs", "", logsPayload, &tls.ConnectionState{PeerCertificates: []*x509.Certificate{cert}})
+	if logRec.Code != http.StatusOK {
+		t.Fatalf("ingest logs status=%d body=%s", logRec.Code, logRec.Body.String())
+	}
+	var ingestResp map[string]any
+	mustDecode(t, logRec.Body.Bytes(), &ingestResp)
+	if ingestResp["accepted_frames"].(float64) != 2 {
+		t.Fatalf("expected accepted_frames=2, got %v", ingestResp["accepted_frames"])
+	}
+	if ingestResp["dropped_frames"].(float64) != 1 {
+		t.Fatalf("expected dropped_frames=1, got %v", ingestResp["dropped_frames"])
+	}
+
+	logsRec := doJSON(t, app.Handler(), "GET", "/executions/"+execID+"/logs", plainAPIKey, nil, nil)
+	if logsRec.Code != http.StatusOK {
+		t.Fatalf("list logs status=%d body=%s", logsRec.Code, logsRec.Body.String())
+	}
+	var logsResp struct {
+		Logs []store.ExecutionLog `json:"logs"`
+	}
+	mustDecode(t, logsRec.Body.Bytes(), &logsResp)
+	if len(logsResp.Logs) != 2 {
+		t.Fatalf("expected 2 logs, got %d", len(logsResp.Logs))
+	}
+}
+
+func newTestAppWithEnrollmentToken(t *testing.T) (*App, *store.MemoryRepo, string, string, string) {
+	t.Helper()
+	repo := store.NewMemoryRepo()
+	cfg := LoadConfig()
+	cfg.AdminKey = "admin"
+	app, err := NewApp(cfg, repo)
+	if err != nil {
+		t.Fatalf("new app: %v", err)
+	}
+	tenantID := uuid.NewString()
+	siteID := uuid.NewString()
+	_, err = repo.CreateTenant(context.Background(), store.Tenant{ID: tenantID, Slug: "acme", Name: "Acme", PrimaryRegion: "eu-central-1", RetentionDays: 30})
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	_, err = repo.CreateSite(context.Background(), store.Site{ID: siteID, TenantID: tenantID, Name: "site-1"})
+	if err != nil {
+		t.Fatalf("create site: %v", err)
+	}
+	enrollToken := "enroll-token-1"
+	_, err = repo.IssueEnrollmentToken(context.Background(), store.EnrollmentToken{
+		ID:        uuid.NewString(),
+		TenantID:  tenantID,
+		SiteID:    siteID,
+		TokenHash: hashString(enrollToken),
+		ExpiresAt: time.Now().UTC().Add(15 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("issue token: %v", err)
+	}
+	return app, repo, tenantID, siteID, enrollToken
+}
+
+func doJSON(t *testing.T, h http.Handler, method, path, apiKey string, body any, tlsState *tls.ConnectionState) *httptest.ResponseRecorder {
+	t.Helper()
+	var buf []byte
+	if body != nil {
+		var err error
+		buf, err = json.Marshal(body)
+		if err != nil {
+			t.Fatalf("marshal body: %v", err)
+		}
+	}
+	req := httptest.NewRequest(method, path, bytes.NewReader(buf))
+	req.Header.Set("Content-Type", "application/json")
+	if apiKey != "" {
+		req.Header.Set("X-API-Key", apiKey)
+	}
+	req.TLS = tlsState
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
+func enroll(t *testing.T, app *App, enrollToken string, csrPEM []byte) map[string]any {
+	t.Helper()
+	rec := doJSON(t, app.Handler(), "POST", "/enroll", "", map[string]any{
+		"enrollment_token": enrollToken,
+		"hostname":         "edge-host-1",
+		"agent_version":    "0.1.0",
+		"os":               "linux",
+		"arch":             "amd64",
+		"csr_pem":          string(csrPEM),
+	}, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("enroll status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	mustDecode(t, rec.Body.Bytes(), &resp)
+	return resp
+}
+
+func mustDecode(t *testing.T, b []byte, v any) {
+	t.Helper()
+	if err := json.Unmarshal(b, v); err != nil {
+		t.Fatalf("decode json: %v body=%s", err, string(b))
+	}
+}
+
+func makeCSR(t *testing.T) []byte {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	tpl := &x509.CertificateRequest{
+		Subject: pkix.Name{
+			CommonName: "pending-agent",
+		},
+	}
+	der, err := x509.CreateCertificateRequest(rand.Reader, tpl, key)
+	if err != nil {
+		t.Fatalf("create csr: %v", err)
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: der})
+}
+
+func parseCert(t *testing.T, certPEM []byte) *x509.Certificate {
+	t.Helper()
+	block, _ := pem.Decode(certPEM)
+	if block == nil {
+		t.Fatalf("failed to decode cert pem")
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatalf("parse cert: %v", err)
+	}
+	if cert.SerialNumber.Cmp(big.NewInt(0)) <= 0 {
+		t.Fatalf("invalid serial")
+	}
+	return cert
+}

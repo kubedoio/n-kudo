@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package nkudo.controlplane.v1;
 
-option go_package = "github.com/n-kudo/n-kudo/api/proto/controlplane/v1;controlplanev1";
+option go_package = "github.com/kubedoio/n-kudo/api/proto/controlplane/v1;controlplanev1";
 
 import "google/protobuf/timestamp.proto";
 

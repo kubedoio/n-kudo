@@ -1,0 +1,38 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: nkudo-postgres
+    environment:
+      POSTGRES_USER: nkudo
+      POSTGRES_PASSWORD: nkudo
+      POSTGRES_DB: nkudo
+    ports:
+      - "5432:5432"
+    volumes:
+      - nkudo_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nkudo -d nkudo"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  backend:
+    build:
+      context: ..
+      dockerfile: deployments/docker/Dockerfile.control-plane
+    container_name: nkudo-control-plane
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://nkudo:nkudo@postgres:5432/nkudo?sslmode=disable
+      ADMIN_KEY: dev-admin-key
+      CONTROL_PLANE_ADDR: :8443
+    command: ["sh", "-c", "/app/control-plane migrate -dir /app/db/migrations && /app/control-plane serve"]
+    ports:
+      - "8443:8443"
+
+volumes:
+  nkudo_pgdata:

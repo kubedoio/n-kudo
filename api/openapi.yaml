@@ -1,0 +1,461 @@
+openapi: 3.1.0
+info:
+  title: n-kudo MVP-1 Control Plane API
+  version: 1.0.0
+  description: |
+    Minimal SaaS control-plane backend for MVP-1.
+    Auth model: `X-Admin-Key` for bootstrap/admin endpoints and `X-API-Key` for tenant-scoped dashboard operations.
+servers:
+  - url: https://localhost:8443
+security:
+  - ApiKeyAuth: []
+paths:
+  /healthz:
+    get:
+      summary: Health check
+      security: []
+      responses:
+        '200':
+          description: Service health
+  /tenants:
+    post:
+      summary: Create tenant
+      security:
+        - AdminKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTenantRequest'
+      responses:
+        '201':
+          description: Tenant created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Tenant'
+  /tenants/{tenantID}/api-keys:
+    post:
+      summary: Create tenant API key
+      security:
+        - AdminKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/TenantID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateAPIKeyRequest'
+      responses:
+        '201':
+          description: API key generated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateAPIKeyResponse'
+  /tenants/{tenantID}/sites:
+    post:
+      summary: Create site
+      parameters:
+        - $ref: '#/components/parameters/TenantID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateSiteRequest'
+      responses:
+        '201':
+          description: Site created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Site'
+    get:
+      summary: List sites for tenant (UI endpoint)
+      parameters:
+        - $ref: '#/components/parameters/TenantID'
+      responses:
+        '200':
+          description: Site list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sites:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Site'
+  /tenants/{tenantID}/enrollment-tokens:
+    post:
+      summary: Issue one-time enrollment token
+      parameters:
+        - $ref: '#/components/parameters/TenantID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IssueEnrollmentTokenRequest'
+      responses:
+        '201':
+          description: Enrollment token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IssueEnrollmentTokenResponse'
+  /enroll:
+    post:
+      summary: Enroll edge agent (token -> mTLS cert)
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EnrollRequest'
+      responses:
+        '200':
+          description: Enrollment success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EnrollResponse'
+  /agents/heartbeat:
+    post:
+      summary: Agent heartbeat ingest (mTLS)
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HeartbeatRequest'
+      responses:
+        '200':
+          description: Heartbeat accepted
+  /agents/logs:
+    post:
+      summary: Agent log stream ingest (best effort, mTLS)
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IngestLogsRequest'
+      responses:
+        '200':
+          description: Frames accepted/dropped
+  /sites/{siteID}/plans:
+    post:
+      summary: Apply plan and return execution status
+      parameters:
+        - $ref: '#/components/parameters/SiteID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApplyPlanRequest'
+      responses:
+        '200':
+          description: Plan accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApplyPlanResponse'
+  /sites/{siteID}/hosts:
+    get:
+      summary: List hosts by site (UI endpoint)
+      parameters:
+        - $ref: '#/components/parameters/SiteID'
+      responses:
+        '200':
+          description: Host list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  hosts:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Host'
+  /sites/{siteID}/vms:
+    get:
+      summary: List microVMs by site (UI endpoint)
+      parameters:
+        - $ref: '#/components/parameters/SiteID'
+      responses:
+        '200':
+          description: VM list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  vms:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/MicroVM'
+  /executions/{executionID}/logs:
+    get:
+      summary: List logs for an execution (UI endpoint)
+      parameters:
+        - $ref: '#/components/parameters/ExecutionID'
+        - name: limit
+          in: query
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Execution logs
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  logs:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ExecutionLog'
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+    AdminKeyAuth:
+      type: apiKey
+      in: header
+      name: X-Admin-Key
+  parameters:
+    TenantID:
+      name: tenantID
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    SiteID:
+      name: siteID
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    ExecutionID:
+      name: executionID
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+  schemas:
+    Tenant:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        slug: { type: string }
+        name: { type: string }
+        primary_region: { type: string }
+        data_retention_days: { type: integer }
+        created_at: { type: string, format: date-time }
+    Site:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        name: { type: string }
+        external_key: { type: string }
+        location_country_code: { type: string }
+        connectivity_state: { type: string }
+        last_heartbeat_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+    Host:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        hostname: { type: string }
+        cpu_cores_total: { type: integer }
+        memory_bytes_total: { type: integer }
+        storage_bytes_total: { type: integer }
+        kvm_available: { type: boolean }
+        cloud_hypervisor_available: { type: boolean }
+        last_facts_at: { type: string, format: date-time }
+        agent_state: { type: string }
+    MicroVM:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        site_id: { type: string, format: uuid }
+        host_id: { type: string, format: uuid }
+        name: { type: string }
+        state: { type: string }
+        vcpu_count: { type: integer }
+        memory_mib: { type: integer }
+        updated_at: { type: string, format: date-time }
+    Execution:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        plan_id: { type: string, format: uuid }
+        operation_id: { type: string }
+        operation_type: { type: string }
+        state: { type: string }
+        vm_id: { type: string, format: uuid }
+        error_code: { type: string }
+        error_message: { type: string }
+    ExecutionLog:
+      type: object
+      properties:
+        id: { type: integer }
+        execution_id: { type: string, format: uuid }
+        sequence: { type: integer }
+        severity: { type: string }
+        message: { type: string }
+        emitted_at: { type: string, format: date-time }
+    PlanAction:
+      type: object
+      required: [operation]
+      properties:
+        operation_id: { type: string }
+        operation: { type: string, enum: [CREATE, START, STOP, DELETE] }
+        vm_id: { type: string, format: uuid }
+        name: { type: string }
+        vcpu_count: { type: integer }
+        memory_mib: { type: integer }
+    CreateTenantRequest:
+      type: object
+      required: [slug, name]
+      properties:
+        slug: { type: string }
+        name: { type: string }
+        primary_region: { type: string, default: eu-central-1 }
+        data_retention_days: { type: integer, default: 30 }
+    CreateSiteRequest:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string }
+        external_key: { type: string }
+        location_country_code: { type: string, minLength: 2, maxLength: 2 }
+    CreateAPIKeyRequest:
+      type: object
+      properties:
+        name: { type: string }
+        expires_in_seconds: { type: integer }
+    CreateAPIKeyResponse:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        name: { type: string }
+        api_key: { type: string }
+        expires_at: { type: string, format: date-time }
+    IssueEnrollmentTokenRequest:
+      type: object
+      required: [site_id]
+      properties:
+        site_id: { type: string, format: uuid }
+        expires_in_seconds: { type: integer, default: 900 }
+    IssueEnrollmentTokenResponse:
+      type: object
+      properties:
+        token_id: { type: string, format: uuid }
+        site_id: { type: string, format: uuid }
+        token: { type: string }
+        expires_at: { type: string, format: date-time }
+        one_time: { type: boolean }
+    EnrollRequest:
+      type: object
+      required: [enrollment_token, hostname, csr_pem]
+      properties:
+        enrollment_token: { type: string }
+        agent_version: { type: string }
+        hostname: { type: string }
+        os: { type: string }
+        arch: { type: string }
+        kernel_version: { type: string }
+        csr_pem: { type: string }
+    EnrollResponse:
+      type: object
+      properties:
+        tenant_id: { type: string, format: uuid }
+        site_id: { type: string, format: uuid }
+        host_id: { type: string, format: uuid }
+        agent_id: { type: string, format: uuid }
+        client_certificate_pem: { type: string }
+        ca_certificate_pem: { type: string }
+        refresh_token: { type: string }
+        heartbeat_endpoint: { type: string }
+        heartbeat_interval_sec: { type: integer }
+    HeartbeatRequest:
+      type: object
+      properties:
+        agent_id: { type: string, format: uuid }
+        heartbeat_seq: { type: integer }
+        agent_version: { type: string }
+        os: { type: string }
+        arch: { type: string }
+        kernel_version: { type: string }
+        hostname: { type: string }
+        cpu_cores_total: { type: integer }
+        memory_bytes_total: { type: integer }
+        storage_bytes_total: { type: integer }
+        kvm_available: { type: boolean }
+        cloud_hypervisor_available: { type: boolean }
+        microvms:
+          type: array
+          items:
+            $ref: '#/components/schemas/MicroVM'
+        execution_updates:
+          type: array
+          items:
+            type: object
+            properties:
+              execution_id: { type: string, format: uuid }
+              state: { type: string, enum: [PENDING, IN_PROGRESS, SUCCEEDED, FAILED] }
+              error_code: { type: string }
+              error_message: { type: string }
+              updated_at: { type: string, format: date-time }
+    IngestLogsRequest:
+      type: object
+      properties:
+        agent_id: { type: string, format: uuid }
+        entries:
+          type: array
+          items:
+            type: object
+            required: [execution_id, sequence, severity, message, emitted_at]
+            properties:
+              execution_id: { type: string, format: uuid }
+              sequence: { type: integer }
+              severity: { type: string, enum: [DEBUG, INFO, WARN, ERROR] }
+              message: { type: string }
+              emitted_at: { type: string, format: date-time }
+    ApplyPlanRequest:
+      type: object
+      required: [idempotency_key, actions]
+      properties:
+        idempotency_key: { type: string }
+        client_request_id: { type: string }
+        actions:
+          type: array
+          items:
+            $ref: '#/components/schemas/PlanAction'
+    ApplyPlanResponse:
+      type: object
+      properties:
+        plan_id: { type: string, format: uuid }
+        plan_version: { type: integer }
+        plan_status: { type: string }
+        deduplicated: { type: boolean }
+        executions:
+          type: array
+          items:
+            $ref: '#/components/schemas/Execution'
