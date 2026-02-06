@@ -33,11 +33,11 @@ type App struct {
 }
 
 func NewApp(cfg Config, repo store.Repo) (*App, error) {
-	ca, err := LoadOrCreateInternalCA(cfg.CACommonName)
+	ca, err := LoadOrCreateInternalCA(cfg.CACommonName, cfg.RequirePersistentPKI)
 	if err != nil {
 		return nil, err
 	}
-	serverCert, err := GenerateServerTLSCert()
+	serverCert, err := GenerateServerTLSCert(cfg.RequirePersistentPKI)
 	if err != nil {
 		return nil, err
 	}
@@ -48,6 +48,32 @@ func NewApp(cfg Config, repo store.Repo) (*App, error) {
 
 func (a *App) Handler() http.Handler {
 	return a.withRequestLogging(a.mux)
+}
+
+func (a *App) StartBackgroundWorkers(ctx context.Context) {
+	if a.cfg.OfflineSweepInterval <= 0 {
+		return
+	}
+	ticker := time.NewTicker(a.cfg.OfflineSweepInterval)
+	go func() {
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				cutoff := time.Now().UTC().Add(-a.cfg.OfflineAfter)
+				updated, err := a.repo.SweepOfflineAgents(context.Background(), cutoff)
+				if err != nil {
+					log.Printf("offline sweeper error: %v", err)
+					continue
+				}
+				if updated > 0 {
+					log.Printf("offline sweeper marked %d agents offline", updated)
+				}
+			}
+		}
+	}()
 }
 
 func (a *App) TLSConfig() (*tls.Config, error) {
@@ -437,6 +463,10 @@ func (a *App) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = a.repo.WriteAudit(r.Context(), agent.TenantID, agent.SiteID, "AGENT", agent.ID, "agent.enroll", "agent", agent.ID, requestID(r), sourceIP(r), nil)
+	heartbeatSeconds := int(a.cfg.HeartbeatInterval.Seconds())
+	if heartbeatSeconds <= 0 {
+		heartbeatSeconds = 15
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"tenant_id":                  agent.TenantID,
 		"site_id":                    agent.SiteID,
@@ -446,8 +476,8 @@ func (a *App) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		"ca_certificate_pem":         string(a.ca.CertPEM()),
 		"refresh_token":              refreshToken,
 		"heartbeat_endpoint":         "/agents/heartbeat",
-		"heartbeat_interval_sec":     15,
-		"heartbeat_interval_seconds": 15,
+		"heartbeat_interval_sec":     heartbeatSeconds,
+		"heartbeat_interval_seconds": heartbeatSeconds,
 	})
 }
 
@@ -501,7 +531,7 @@ func (a *App) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		HostFacts                hostFacts               `json:"host_facts"`
 	}
 	var req request
-	if err := decodeJSON(r.Body, &req); err != nil {
+	if err := decodeJSONAllowUnknown(r.Body, &req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -586,7 +616,20 @@ func (a *App) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to ingest heartbeat")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"next_heartbeat_seconds": 15, "pending_plans": []any{}})
+
+	pending, err := a.repo.LeasePendingPlans(r.Context(), agent.ID, a.cfg.MaxPlansPerHeartbeat, a.cfg.PlanLeaseTTL)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to lease plans")
+		return
+	}
+	heartbeatSeconds := int(a.cfg.HeartbeatInterval.Seconds())
+	if heartbeatSeconds <= 0 {
+		heartbeatSeconds = 15
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"next_heartbeat_seconds": heartbeatSeconds,
+		"pending_plans":          leasedPlansToAgentPayload(pending),
+	})
 }
 
 func (a *App) handleIngestLogFrame(w http.ResponseWriter, r *http.Request) {
@@ -599,7 +642,7 @@ func (a *App) handleIngestLogFrame(w http.ResponseWriter, r *http.Request) {
 		EmittedAt   time.Time `json:"emitted_at"`
 	}
 	var req request
-	if err := decodeJSON(r.Body, &req); err != nil {
+	if err := decodeJSONAllowUnknown(r.Body, &req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -630,12 +673,66 @@ func (a *App) handleIngestLogFrame(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusAccepted)
 }
 
-func (a *App) handleListPendingPlansV1(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"plans": []any{}})
+func (a *App) handleListPendingPlansV1(w http.ResponseWriter, r *http.Request) {
+	agent := r.Context().Value(ctxAgent{}).(store.Agent)
+	pending, err := a.repo.LeasePendingPlans(r.Context(), agent.ID, a.cfg.MaxPlansPerHeartbeat, a.cfg.PlanLeaseTTL)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to lease plans")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"plans": leasedPlansToAgentPayload(pending)})
 }
 
-func (a *App) handleReportPlanResultV1(w http.ResponseWriter, _ *http.Request) {
-	w.WriteHeader(http.StatusAccepted)
+func (a *App) handleReportPlanResultV1(w http.ResponseWriter, r *http.Request) {
+	agent := r.Context().Value(ctxAgent{}).(store.Agent)
+	type actionResult struct {
+		ActionID   string    `json:"action_id"`
+		OK         bool      `json:"ok"`
+		ErrorCode  string    `json:"error_code"`
+		Message    string    `json:"message"`
+		FinishedAt time.Time `json:"finished_at"`
+	}
+	type request struct {
+		PlanID      string         `json:"plan_id"`
+		ExecutionID string         `json:"execution_id"`
+		Results     []actionResult `json:"results"`
+	}
+	var req request
+	if err := decodeJSON(r.Body, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	items := make([]store.PlanActionResultItem, 0, len(req.Results))
+	for _, result := range req.Results {
+		items = append(items, store.PlanActionResultItem{
+			ActionID:   strings.TrimSpace(result.ActionID),
+			OK:         result.OK,
+			ErrorCode:  strings.TrimSpace(result.ErrorCode),
+			Message:    strings.TrimSpace(result.Message),
+			FinishedAt: result.FinishedAt,
+		})
+	}
+	if len(items) == 0 {
+		writeError(w, http.StatusBadRequest, "results are required")
+		return
+	}
+	err := a.repo.ReportPlanResult(r.Context(), agent.ID, store.PlanResultReport{
+		PlanID:      strings.TrimSpace(req.PlanID),
+		ExecutionID: strings.TrimSpace(req.ExecutionID),
+		Results:     items,
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, store.ErrNotFound):
+			writeError(w, http.StatusNotFound, "plan not found")
+		case errors.Is(err, store.ErrUnauthorized):
+			writeError(w, http.StatusForbidden, "agent does not own plan")
+		default:
+			writeError(w, http.StatusInternalServerError, "failed to persist execution result")
+		}
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"status": "accepted"})
 }
 
 func (a *App) handleIngestLogs(w http.ResponseWriter, r *http.Request) {
@@ -645,7 +742,7 @@ func (a *App) handleIngestLogs(w http.ResponseWriter, r *http.Request) {
 		Entries []store.LogIngestEntry `json:"entries"`
 	}
 	var req request
-	if err := decodeJSON(r.Body, &req); err != nil {
+	if err := decodeJSONAllowUnknown(r.Body, &req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -797,8 +894,18 @@ func writeError(w http.ResponseWriter, status int, message string) {
 }
 
 func decodeJSON(body io.Reader, v any) error {
+	return decodeJSONWithMode(body, v, true)
+}
+
+func decodeJSONAllowUnknown(body io.Reader, v any) error {
+	return decodeJSONWithMode(body, v, false)
+}
+
+func decodeJSONWithMode(body io.Reader, v any, disallowUnknown bool) error {
 	dec := json.NewDecoder(io.LimitReader(body, 1<<20))
-	dec.DisallowUnknownFields()
+	if disallowUnknown {
+		dec.DisallowUnknownFields()
+	}
 	if err := dec.Decode(v); err != nil {
 		return err
 	}
@@ -839,6 +946,110 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+type leasedPlanPayload struct {
+	PlanID      string              `json:"plan_id"`
+	ExecutionID string              `json:"execution_id"`
+	Actions     []leasedActionEntry `json:"actions"`
+}
+
+type leasedActionEntry struct {
+	ActionID      string          `json:"action_id"`
+	Type          string          `json:"type"`
+	Params        json.RawMessage `json:"params"`
+	TimeoutSecond int             `json:"timeout"`
+}
+
+func leasedPlansToAgentPayload(in []store.LeasedPlan) []leasedPlanPayload {
+	out := make([]leasedPlanPayload, 0, len(in))
+	for _, plan := range in {
+		actions := make([]leasedActionEntry, 0, len(plan.Actions))
+		for _, action := range plan.Actions {
+			entry, ok := toLeasedActionEntry(action)
+			if !ok {
+				continue
+			}
+			actions = append(actions, entry)
+		}
+		if len(actions) == 0 {
+			continue
+		}
+		out = append(out, leasedPlanPayload{
+			PlanID:      plan.PlanID,
+			ExecutionID: firstNonEmpty(plan.ExecutionID, plan.PlanID),
+			Actions:     actions,
+		})
+	}
+	return out
+}
+
+func toLeasedActionEntry(action store.PlanAction) (leasedActionEntry, bool) {
+	type applyPayload struct {
+		VMID      string `json:"vm_id"`
+		Name      string `json:"name"`
+		VCPUCount int    `json:"vcpu_count"`
+		MemoryMiB int64  `json:"memory_mib"`
+	}
+	var payload applyPayload
+	if len(action.PayloadJSON) > 0 {
+		_ = json.Unmarshal(action.PayloadJSON, &payload)
+	}
+
+	operation := strings.ToUpper(strings.TrimSpace(action.OperationType))
+	vmID := firstNonEmpty(payload.VMID, action.VMID)
+	switch operation {
+	case "CREATE":
+		if vmID == "" {
+			return leasedActionEntry{}, false
+		}
+		params, _ := json.Marshal(map[string]any{
+			"vm_id":      vmID,
+			"name":       firstNonEmpty(payload.Name, vmID),
+			"vcpu":       maxInt(payload.VCPUCount, 1),
+			"memory_mib": maxInt64(payload.MemoryMiB, 128),
+		})
+		return leasedActionEntry{
+			ActionID:      action.OperationID,
+			Type:          "MicroVMCreate",
+			Params:        params,
+			TimeoutSecond: 30,
+		}, true
+	case "START", "STOP", "DELETE":
+		if vmID == "" {
+			return leasedActionEntry{}, false
+		}
+		actionType := "MicroVMStart"
+		if operation == "STOP" {
+			actionType = "MicroVMStop"
+		}
+		if operation == "DELETE" {
+			actionType = "MicroVMDelete"
+		}
+		params, _ := json.Marshal(map[string]any{"vm_id": vmID})
+		return leasedActionEntry{
+			ActionID:      action.OperationID,
+			Type:          actionType,
+			Params:        params,
+			TimeoutSecond: 30,
+		}, true
+	default:
+		return leasedActionEntry{}, false
+	}
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func maxInt64(a, b int64) int64 {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func requestID(r *http.Request) string {

@@ -172,7 +172,7 @@ INSERT INTO agents (
   cert_serial, agent_version, os, arch, kernel_version, state, enrolled_at, last_heartbeat_at
 )
 VALUES ($1, $2, $3, $4, (SELECT token_hash FROM enrollment_tokens WHERE id=$5), $6, $7, $8, $9, $10, $11, 'ONLINE', now(), now())
-RETURNING id, tenant_id, site_id, host_id, cert_serial, refresh_token_hash, agent_version, os, arch, COALESCE(kernel_version, '')`,
+RETURNING id, tenant_id, site_id, host_id, cert_serial, refresh_token_hash, agent_version, os, arch, COALESCE(kernel_version, ''), state::text, last_heartbeat_at`,
 		agent.ID,
 		agent.TenantID,
 		agent.SiteID,
@@ -195,6 +195,8 @@ RETURNING id, tenant_id, site_id, host_id, cert_serial, refresh_token_hash, agen
 		&agent.OS,
 		&agent.Arch,
 		&agent.KernelVersion,
+		&agent.State,
+		&agent.LastHeartbeatAt,
 	)
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -217,11 +219,11 @@ WHERE id=$1 AND tenant_id=$2`, agent.SiteID, agent.TenantID); err != nil {
 
 func (r *PostgresRepo) GetAgentByID(ctx context.Context, agentID string) (Agent, error) {
 	row := r.db.QueryRowContext(ctx, `
-SELECT id, tenant_id, site_id, host_id, cert_serial, refresh_token_hash, agent_version, os, arch, COALESCE(kernel_version, '')
+SELECT id, tenant_id, site_id, host_id, cert_serial, refresh_token_hash, agent_version, os, arch, COALESCE(kernel_version, ''), state::text, last_heartbeat_at
 FROM agents
 WHERE id = $1`, agentID)
 	var a Agent
-	if err := row.Scan(&a.ID, &a.TenantID, &a.SiteID, &a.HostID, &a.CertSerial, &a.RefreshTokenHash, &a.AgentVersion, &a.OS, &a.Arch, &a.KernelVersion); err != nil {
+	if err := row.Scan(&a.ID, &a.TenantID, &a.SiteID, &a.HostID, &a.CertSerial, &a.RefreshTokenHash, &a.AgentVersion, &a.OS, &a.Arch, &a.KernelVersion, &a.State, &a.LastHeartbeatAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return Agent{}, ErrNotFound
 		}
@@ -336,32 +338,7 @@ RETURNING plan_id`, state, nullable(upd.ErrorCode), nullable(upd.ErrorMessage), 
 	}
 
 	for planID := range planIDs {
-		if _, err := tx.ExecContext(ctx, `
-WITH rollup AS (
-  SELECT
-    SUM(CASE WHEN state = 'FAILED' THEN 1 ELSE 0 END) AS failed,
-    SUM(CASE WHEN state IN ('PENDING','IN_PROGRESS') THEN 1 ELSE 0 END) AS active,
-    SUM(CASE WHEN state = 'IN_PROGRESS' THEN 1 ELSE 0 END) AS in_progress
-  FROM executions
-  WHERE plan_id = $1
-)
-UPDATE plans
-SET status = CASE
-    WHEN (SELECT failed FROM rollup) > 0 THEN 'FAILED'
-    WHEN (SELECT active FROM rollup) = 0 THEN 'SUCCEEDED'
-    WHEN (SELECT in_progress FROM rollup) > 0 THEN 'IN_PROGRESS'
-    ELSE 'PENDING'
-  END,
-  started_at = CASE
-    WHEN started_at IS NULL AND (SELECT in_progress FROM rollup) > 0 THEN now()
-    ELSE started_at
-  END,
-  completed_at = CASE
-    WHEN (SELECT failed FROM rollup) > 0 OR (SELECT active FROM rollup) = 0 THEN now()
-    ELSE completed_at
-  END,
-  updated_at = now()
-WHERE id = $1`, planID); err != nil {
+		if err := r.rollupPlanStatusTx(ctx, tx, planID); err != nil {
 			return err
 		}
 	}
@@ -500,6 +477,214 @@ RETURNING updated_at`, exec.ID, exec.TenantID, exec.SiteID, exec.PlanID, nullabl
 	return ApplyPlanResult{Plan: plan, Executions: execs}, nil
 }
 
+func (r *PostgresRepo) LeasePendingPlans(ctx context.Context, agentID string, limit int, leaseTTL time.Duration) ([]LeasedPlan, error) {
+	agent, err := r.GetAgentByID(ctx, agentID)
+	if err != nil {
+		return nil, err
+	}
+	if limit <= 0 {
+		limit = 1
+	}
+	if leaseTTL <= 0 {
+		leaseTTL = 30 * time.Second
+	}
+
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	now := time.Now().UTC()
+	leaseUntil := now.Add(leaseTTL)
+	rows, err := tx.QueryContext(ctx, `
+WITH candidate AS (
+  SELECT id
+  FROM plans
+  WHERE tenant_id = $2
+    AND site_id = $3
+    AND status IN ('PENDING','IN_PROGRESS')
+    AND (leased_by_agent_id = $1 OR lease_expires_at IS NULL OR lease_expires_at <= $4)
+  ORDER BY created_at ASC
+  LIMIT $5
+  FOR UPDATE SKIP LOCKED
+)
+UPDATE plans p
+SET leased_by_agent_id = $1,
+    lease_expires_at = $6,
+    status = CASE WHEN p.status = 'PENDING' THEN 'IN_PROGRESS' ELSE p.status END,
+    started_at = CASE WHEN p.started_at IS NULL THEN $4 ELSE p.started_at END,
+    updated_at = $4
+FROM candidate c
+WHERE p.id = c.id
+RETURNING p.id`,
+		agent.ID, agent.TenantID, agent.SiteID, now, limit, leaseUntil)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	planIDs := make([]string, 0)
+	for rows.Next() {
+		var planID string
+		if err := rows.Scan(&planID); err != nil {
+			return nil, err
+		}
+		planIDs = append(planIDs, planID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	out := make([]LeasedPlan, 0, len(planIDs))
+	for _, planID := range planIDs {
+		actionRows, err := tx.QueryContext(ctx, `
+SELECT pa.id, pa.plan_id, pa.operation_id, pa.operation_type, COALESCE(pa.vm_id::text,''), pa.payload_json
+FROM plan_actions pa
+JOIN executions e
+  ON e.tenant_id = pa.tenant_id
+ AND e.plan_id = pa.plan_id
+ AND e.operation_id = pa.operation_id
+WHERE pa.tenant_id = $1
+  AND pa.plan_id = $2
+  AND e.state IN ('PENDING','IN_PROGRESS')
+ORDER BY pa.created_at ASC`, agent.TenantID, planID)
+		if err != nil {
+			return nil, err
+		}
+		actions := make([]PlanAction, 0)
+		for actionRows.Next() {
+			var action PlanAction
+			if err := actionRows.Scan(&action.ID, &action.PlanID, &action.OperationID, &action.OperationType, &action.VMID, &action.PayloadJSON); err != nil {
+				actionRows.Close()
+				return nil, err
+			}
+			actions = append(actions, action)
+		}
+		if err := actionRows.Err(); err != nil {
+			actionRows.Close()
+			return nil, err
+		}
+		actionRows.Close()
+		if len(actions) == 0 {
+			continue
+		}
+		out = append(out, LeasedPlan{
+			PlanID:      planID,
+			ExecutionID: planID,
+			Actions:     actions,
+		})
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (r *PostgresRepo) ReportPlanResult(ctx context.Context, agentID string, report PlanResultReport) error {
+	agent, err := r.GetAgentByID(ctx, agentID)
+	if err != nil {
+		return err
+	}
+
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	planID := strings.TrimSpace(report.PlanID)
+	if planID == "" {
+		planID, err = r.resolvePlanIDTx(ctx, tx, agent.TenantID, agent.SiteID, report.ExecutionID)
+		if err != nil {
+			return err
+		}
+	}
+	if planID == "" {
+		return ErrNotFound
+	}
+
+	var exists bool
+	if err := tx.QueryRowContext(ctx, `
+SELECT EXISTS(
+  SELECT 1
+  FROM plans
+  WHERE id = $1
+    AND tenant_id = $2
+    AND site_id = $3
+)`, planID, agent.TenantID, agent.SiteID).Scan(&exists); err != nil {
+		return err
+	}
+	if !exists {
+		return ErrNotFound
+	}
+
+	now := time.Now().UTC()
+	for _, result := range report.Results {
+		actionID := strings.TrimSpace(result.ActionID)
+		if actionID == "" {
+			continue
+		}
+
+		state := "FAILED"
+		errorCode := nullable(chooseStringPG(result.ErrorCode, "ACTION_FAILED"))
+		errorMessage := nullable(chooseStringPG(result.Message, "action failed"))
+		if result.OK {
+			state = "SUCCEEDED"
+			errorCode = nil
+			errorMessage = nil
+		}
+		completedAt := result.FinishedAt
+		if completedAt.IsZero() {
+			completedAt = now
+		}
+
+		var vmID string
+		var operationType string
+		err := tx.QueryRowContext(ctx, `
+UPDATE executions
+SET state = $1,
+    error_code = $2,
+    error_message = $3,
+    host_id = $4,
+    agent_id = $5,
+    started_at = COALESCE(started_at, $6),
+    completed_at = $6,
+    updated_at = $6
+WHERE tenant_id = $7
+  AND site_id = $8
+  AND plan_id = $9
+  AND operation_id = $10
+RETURNING COALESCE(vm_id::text, ''), operation_type`,
+			state,
+			errorCode,
+			errorMessage,
+			nullable(agent.HostID),
+			nullable(agent.ID),
+			completedAt,
+			agent.TenantID,
+			agent.SiteID,
+			planID,
+			actionID,
+		).Scan(&vmID, &operationType)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				continue
+			}
+			return err
+		}
+		if err := r.applyExecutionVMStateTx(ctx, tx, agent.TenantID, agent.SiteID, nullable(agent.HostID), vmID, operationType, state, completedAt); err != nil {
+			return err
+		}
+	}
+
+	if err := r.rollupPlanStatusTx(ctx, tx, planID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func (r *PostgresRepo) IngestLogs(ctx context.Context, req LogIngest) (accepted int64, dropped int64, err error) {
 	agent, err := r.GetAgentByID(ctx, req.AgentID)
 	if err != nil {
@@ -531,6 +716,53 @@ ON CONFLICT (tenant_id, execution_id, sequence) DO NOTHING`,
 		accepted++
 	}
 	return accepted, dropped, nil
+}
+
+func (r *PostgresRepo) SweepOfflineAgents(ctx context.Context, staleBefore time.Time) (int64, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
+	res, err := tx.ExecContext(ctx, `
+UPDATE agents
+SET state = 'OFFLINE',
+    updated_at = now()
+WHERE state <> 'OFFLINE'
+  AND last_heartbeat_at IS NOT NULL
+  AND last_heartbeat_at < $1`, staleBefore)
+	if err != nil {
+		return 0, err
+	}
+	updated, _ := res.RowsAffected()
+
+	if _, err := tx.ExecContext(ctx, `
+UPDATE sites s
+SET connectivity_state = CASE
+      WHEN EXISTS (
+        SELECT 1
+        FROM agents a
+        WHERE a.tenant_id = s.tenant_id
+          AND a.site_id = s.id
+          AND a.state = 'ONLINE'
+      ) THEN 'ONLINE'
+      ELSE 'OFFLINE'
+    END,
+    last_heartbeat_at = (
+      SELECT MAX(a.last_heartbeat_at)
+      FROM agents a
+      WHERE a.tenant_id = s.tenant_id
+        AND a.site_id = s.id
+    ),
+    updated_at = now()`); err != nil {
+		return 0, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return updated, nil
 }
 
 func (r *PostgresRepo) ListHosts(ctx context.Context, tenantID, siteID string) ([]Host, error) {
@@ -688,11 +920,137 @@ ORDER BY created_at ASC`, plan.ID)
 	return ApplyPlanResult{Plan: plan, Executions: execs}, true, nil
 }
 
+func (r *PostgresRepo) resolvePlanIDTx(ctx context.Context, tx *sql.Tx, tenantID, siteID, executionOrPlanID string) (string, error) {
+	executionOrPlanID = strings.TrimSpace(executionOrPlanID)
+	if executionOrPlanID == "" {
+		return "", nil
+	}
+
+	var planID string
+	err := tx.QueryRowContext(ctx, `
+SELECT id
+FROM plans
+WHERE id = $1
+  AND tenant_id = $2
+  AND site_id = $3`, executionOrPlanID, tenantID, siteID).Scan(&planID)
+	if err == nil {
+		return planID, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return "", err
+	}
+
+	err = tx.QueryRowContext(ctx, `
+SELECT plan_id
+FROM executions
+WHERE id = $1
+  AND tenant_id = $2
+  AND site_id = $3`, executionOrPlanID, tenantID, siteID).Scan(&planID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return planID, nil
+}
+
+func (r *PostgresRepo) rollupPlanStatusTx(ctx context.Context, tx *sql.Tx, planID string) error {
+	_, err := tx.ExecContext(ctx, `
+WITH rollup AS (
+  SELECT
+    SUM(CASE WHEN state = 'FAILED' THEN 1 ELSE 0 END) AS failed,
+    SUM(CASE WHEN state IN ('PENDING','IN_PROGRESS') THEN 1 ELSE 0 END) AS active,
+    SUM(CASE WHEN state = 'IN_PROGRESS' THEN 1 ELSE 0 END) AS in_progress,
+    SUM(CASE WHEN state = 'SUCCEEDED' THEN 1 ELSE 0 END) AS completed
+  FROM executions
+  WHERE plan_id = $1
+)
+UPDATE plans
+SET status = CASE
+    WHEN (SELECT failed FROM rollup) > 0 THEN 'FAILED'
+    WHEN (SELECT active FROM rollup) = 0 THEN 'SUCCEEDED'
+    WHEN (SELECT in_progress FROM rollup) > 0
+      OR ((SELECT active FROM rollup) > 0 AND (SELECT completed FROM rollup) > 0) THEN 'IN_PROGRESS'
+    ELSE 'PENDING'
+  END,
+  started_at = CASE
+    WHEN started_at IS NULL AND (SELECT in_progress FROM rollup) > 0 THEN now()
+    ELSE started_at
+  END,
+  completed_at = CASE
+    WHEN (SELECT failed FROM rollup) > 0 OR (SELECT active FROM rollup) = 0 THEN now()
+    ELSE completed_at
+  END,
+  leased_by_agent_id = CASE
+    WHEN (SELECT failed FROM rollup) > 0 OR (SELECT active FROM rollup) = 0 THEN NULL
+    ELSE leased_by_agent_id
+  END,
+  lease_expires_at = CASE
+    WHEN (SELECT failed FROM rollup) > 0 OR (SELECT active FROM rollup) = 0 THEN NULL
+    ELSE lease_expires_at
+  END,
+  updated_at = now()
+WHERE id = $1`, planID)
+	return err
+}
+
+func (r *PostgresRepo) applyExecutionVMStateTx(ctx context.Context, tx *sql.Tx, tenantID, siteID string, hostID any, vmID, operationType, executionState string, at time.Time) error {
+	vmID = strings.TrimSpace(vmID)
+	if vmID == "" {
+		return nil
+	}
+
+	if strings.EqualFold(executionState, "FAILED") {
+		_, err := tx.ExecContext(ctx, `
+UPDATE microvms
+SET state = 'ERROR',
+    last_transition_at = $3,
+    updated_at = $3
+WHERE id = $1
+  AND tenant_id = $2`, vmID, tenantID, at)
+		return err
+	}
+	if !strings.EqualFold(executionState, "SUCCEEDED") {
+		return nil
+	}
+
+	switch strings.ToUpper(strings.TrimSpace(operationType)) {
+	case "DELETE":
+		_, err := tx.ExecContext(ctx, `DELETE FROM microvms WHERE id = $1 AND tenant_id = $2`, vmID, tenantID)
+		return err
+	case "CREATE", "START", "STOP":
+		nextState := "STOPPED"
+		if strings.EqualFold(operationType, "START") {
+			nextState = "RUNNING"
+		}
+		_, err := tx.ExecContext(ctx, `
+INSERT INTO microvms (id, tenant_id, site_id, host_id, name, state, vcpu_count, memory_mib, last_transition_at, updated_at)
+VALUES ($1, $2, $3, $4, $1, $5, 1, 128, $6, $6)
+ON CONFLICT (id)
+DO UPDATE SET
+  host_id = COALESCE(EXCLUDED.host_id, microvms.host_id),
+  state = EXCLUDED.state,
+  last_transition_at = EXCLUDED.last_transition_at,
+  updated_at = EXCLUDED.updated_at`, vmID, tenantID, siteID, hostID, nextState, at)
+		return err
+	default:
+		return nil
+	}
+}
+
 func nullable(s string) any {
 	if strings.TrimSpace(s) == "" {
 		return nil
 	}
 	return s
+}
+
+func chooseStringPG(v, fallback string) string {
+	if strings.TrimSpace(v) == "" {
+		return fallback
+	}
+	return v
 }
 
 func isUniqueViolation(err error) bool {

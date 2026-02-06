@@ -81,6 +81,8 @@ type Agent struct {
 	OS               string
 	Arch             string
 	KernelVersion    string
+	State            string
+	LastHeartbeatAt  *time.Time
 }
 
 type Plan struct {
@@ -102,6 +104,12 @@ type PlanAction struct {
 	OperationType string `json:"operation"`
 	VMID          string `json:"vm_id,omitempty"`
 	PayloadJSON   []byte `json:"payload_json"`
+}
+
+type LeasedPlan struct {
+	PlanID      string       `json:"plan_id"`
+	ExecutionID string       `json:"execution_id"`
+	Actions     []PlanAction `json:"actions"`
 }
 
 type Execution struct {
@@ -207,6 +215,20 @@ type ApplyPlanResult struct {
 	Deduplicated bool        `json:"deduplicated"`
 }
 
+type PlanResultReport struct {
+	PlanID      string                 `json:"plan_id"`
+	ExecutionID string                 `json:"execution_id"`
+	Results     []PlanActionResultItem `json:"results"`
+}
+
+type PlanActionResultItem struct {
+	ActionID   string    `json:"action_id"`
+	OK         bool      `json:"ok"`
+	ErrorCode  string    `json:"error_code,omitempty"`
+	Message    string    `json:"message,omitempty"`
+	FinishedAt time.Time `json:"finished_at,omitempty"`
+}
+
 type TokenConsumeResult struct {
 	TokenID  string
 	TenantID string
@@ -225,7 +247,10 @@ type Repo interface {
 	GetAgentByID(ctx context.Context, agentID string) (Agent, error)
 	IngestHeartbeat(ctx context.Context, hb Heartbeat) error
 	ApplyPlan(ctx context.Context, input ApplyPlanInput) (ApplyPlanResult, error)
+	LeasePendingPlans(ctx context.Context, agentID string, limit int, leaseTTL time.Duration) ([]LeasedPlan, error)
+	ReportPlanResult(ctx context.Context, agentID string, report PlanResultReport) error
 	IngestLogs(ctx context.Context, req LogIngest) (accepted int64, dropped int64, err error)
+	SweepOfflineAgents(ctx context.Context, staleBefore time.Time) (int64, error)
 	ListHosts(ctx context.Context, tenantID, siteID string) ([]Host, error)
 	ListVMs(ctx context.Context, tenantID, siteID string) ([]MicroVM, error)
 	ListExecutionLogs(ctx context.Context, tenantID, executionID string, limit int) ([]ExecutionLog, error)

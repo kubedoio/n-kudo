@@ -5,7 +5,7 @@ BIN_NAME="nkudo-edge"
 INSTALL_DIR="/usr/local/bin"
 STATE_DIR="/var/lib/nkudo-edge/state"
 PKI_DIR="/var/lib/nkudo-edge/pki"
-RUNTIME_DIR="/var/lib/nkudo-edge/runtime"
+RUNTIME_DIR="/var/lib/nkudo-edge/vms"
 UNIT_SRC_URL_DEFAULT="https://raw.githubusercontent.com/kubedoio/n-kudo/main/deployments/systemd/nkudo-edge.service"
 
 if [ "$(id -u)" -ne 0 ]; then

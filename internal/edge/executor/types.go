@@ -16,6 +16,7 @@ const (
 )
 
 type Plan struct {
+	PlanID      string   `json:"plan_id,omitempty"`
 	ExecutionID string   `json:"execution_id"`
 	Actions     []Action `json:"actions"`
 }
@@ -50,6 +51,7 @@ type ActionResult struct {
 }
 
 type PlanResult struct {
+	PlanID      string         `json:"plan_id,omitempty"`
 	ExecutionID string         `json:"execution_id"`
 	Results     []ActionResult `json:"results"`
 }

@@ -90,6 +90,7 @@ func runServe(cfg controlplane.Config) error {
 	if err != nil {
 		return err
 	}
+	app.StartBackgroundWorkers(ctx)
 	tlsCfg, err := app.TLSConfig()
 	if err != nil {
 		return err

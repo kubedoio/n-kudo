@@ -139,7 +139,12 @@ func TestHeartbeatV1HostFactsCompatibility(t *testing.T) {
 	cert := parseCert(t, []byte(certPEM))
 
 	hbPayload := map[string]any{
-		"agent_id": agentID,
+		"agent_id":   agentID,
+		"tenant_id":  tenantID,
+		"site_id":    siteID,
+		"host_id":    "host-v1-compat",
+		"sent_at":    time.Now().UTC().Format(time.RFC3339Nano),
+		"extra_root": "ignored",
 		"host_facts": map[string]any{
 			"cpu_cores":          4,
 			"memory_total_bytes": int64(4 * 1024 * 1024 * 1024),
@@ -161,7 +166,11 @@ func TestHeartbeatV1HostFactsCompatibility(t *testing.T) {
 				"name":       "vm-compat-1",
 				"status":     "RUNNING",
 				"updated_at": time.Now().UTC().Format(time.RFC3339Nano),
+				"ignored":    true,
 			},
+		},
+		"netbird_status": map[string]any{
+			"connected": true,
 		},
 	}
 	rec := doJSON(t, app.Handler(), "POST", "/v1/heartbeat", "", hbPayload, &tls.ConnectionState{PeerCertificates: []*x509.Certificate{cert}})
@@ -252,6 +261,186 @@ func TestPlanSubmissionAndLogs(t *testing.T) {
 	mustDecode(t, logsRec.Body.Bytes(), &logsResp)
 	if len(logsResp.Logs) != 2 {
 		t.Fatalf("expected 2 logs, got %d", len(logsResp.Logs))
+	}
+}
+
+func TestStrictDecodeStillEnforcedForAdminEndpoints(t *testing.T) {
+	app, repo, tenantID, _, _ := newTestAppWithEnrollmentToken(t)
+	plainAPIKey := "nk_test_key"
+	_, err := repo.CreateAPIKey(context.Background(), store.APIKey{ID: uuid.NewString(), TenantID: tenantID, Name: "dashboard", KeyHash: hashString(plainAPIKey)})
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+
+	rec := doJSON(t, app.Handler(), "POST", "/tenants/"+tenantID+"/sites", plainAPIKey, map[string]any{
+		"name":        "strict-site",
+		"extra_field": "must-fail",
+	}, nil)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected strict decoder 400, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHeartbeatPlanDeliveryAndResultPersistence(t *testing.T) {
+	app, repo, tenantID, siteID, enrollToken := newTestAppWithEnrollmentToken(t)
+	plainAPIKey := "nk_test_key"
+	_, err := repo.CreateAPIKey(context.Background(), store.APIKey{ID: uuid.NewString(), TenantID: tenantID, Name: "dashboard", KeyHash: hashString(plainAPIKey)})
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+
+	csrPEM := makeCSR(t)
+	enrollResp := enroll(t, app, enrollToken, csrPEM)
+	agentID := enrollResp["agent_id"].(string)
+	certPEM := enrollResp["client_certificate_pem"].(string)
+	cert := parseCert(t, []byte(certPEM))
+
+	planPayload := map[string]any{
+		"idempotency_key": "plan-run-once",
+		"actions": []map[string]any{
+			{
+				"operation_id": "create-vm-1",
+				"operation":    "CREATE",
+				"vm_id":        "vm-runonce-1",
+				"name":         "vm-runonce-1",
+				"vcpu_count":   1,
+				"memory_mib":   256,
+			},
+			{
+				"operation_id": "start-vm-1",
+				"operation":    "START",
+				"vm_id":        "vm-runonce-1",
+			},
+		},
+	}
+	applyRec := doJSON(t, app.Handler(), "POST", "/sites/"+siteID+"/plans", plainAPIKey, planPayload, nil)
+	if applyRec.Code != http.StatusOK {
+		t.Fatalf("apply plan status=%d body=%s", applyRec.Code, applyRec.Body.String())
+	}
+	var applyResp struct {
+		PlanID     string            `json:"plan_id"`
+		Executions []store.Execution `json:"executions"`
+	}
+	mustDecode(t, applyRec.Body.Bytes(), &applyResp)
+	if len(applyResp.Executions) != 2 {
+		t.Fatalf("expected 2 executions, got %d", len(applyResp.Executions))
+	}
+
+	hbPayload := map[string]any{
+		"agent_id":        agentID,
+		"heartbeat_seq":   1,
+		"tenant_id":       tenantID,
+		"site_id":         siteID,
+		"host_id":         "host-runonce",
+		"sent_at":         time.Now().UTC().Format(time.RFC3339Nano),
+		"extra_heartbeat": "ignored",
+		"host_facts": map[string]any{
+			"cpu_cores":          2,
+			"memory_total_bytes": int64(2 * 1024 * 1024 * 1024),
+			"disks": []map[string]any{
+				{"mountpoint": "/", "total_bytes": int64(50 * 1024 * 1024 * 1024)},
+			},
+			"os":     "linux",
+			"arch":   "amd64",
+			"kernel": "6.8.0",
+			"kvm": map[string]any{
+				"present":  true,
+				"readable": true,
+				"writable": true,
+			},
+		},
+		"netbird_status": map[string]any{"connected": true},
+	}
+	hbRec := doJSON(t, app.Handler(), "POST", "/v1/heartbeat", "", hbPayload, &tls.ConnectionState{PeerCertificates: []*x509.Certificate{cert}})
+	if hbRec.Code != http.StatusOK {
+		t.Fatalf("heartbeat status=%d body=%s", hbRec.Code, hbRec.Body.String())
+	}
+	var hbResp struct {
+		PendingPlans []struct {
+			PlanID      string `json:"plan_id"`
+			ExecutionID string `json:"execution_id"`
+			Actions     []struct {
+				ActionID string `json:"action_id"`
+				Type     string `json:"type"`
+			} `json:"actions"`
+		} `json:"pending_plans"`
+	}
+	mustDecode(t, hbRec.Body.Bytes(), &hbResp)
+	if len(hbResp.PendingPlans) != 1 {
+		t.Fatalf("expected 1 pending plan, got %d", len(hbResp.PendingPlans))
+	}
+	if hbResp.PendingPlans[0].PlanID != applyResp.PlanID {
+		t.Fatalf("expected pending plan id %s, got %s", applyResp.PlanID, hbResp.PendingPlans[0].PlanID)
+	}
+	if len(hbResp.PendingPlans[0].Actions) != 2 {
+		t.Fatalf("expected 2 leased actions, got %d", len(hbResp.PendingPlans[0].Actions))
+	}
+
+	logRec := doJSON(t, app.Handler(), "POST", "/v1/logs", "", map[string]any{
+		"execution_id": applyResp.Executions[0].ID,
+		"sequence":     1,
+		"level":        "INFO",
+		"message":      "run once started",
+		"emitted_at":   time.Now().UTC().Format(time.RFC3339Nano),
+		"tenant_id":    tenantID,
+		"action_id":    "create-vm-1",
+	}, &tls.ConnectionState{PeerCertificates: []*x509.Certificate{cert}})
+	if logRec.Code != http.StatusAccepted {
+		t.Fatalf("log frame status=%d body=%s", logRec.Code, logRec.Body.String())
+	}
+
+	results := make([]map[string]any, 0, len(hbResp.PendingPlans[0].Actions))
+	for _, action := range hbResp.PendingPlans[0].Actions {
+		results = append(results, map[string]any{
+			"action_id":   action.ActionID,
+			"ok":          true,
+			"message":     "ok",
+			"finished_at": time.Now().UTC().Format(time.RFC3339Nano),
+		})
+	}
+	resultRec := doJSON(t, app.Handler(), "POST", "/v1/executions/result", "", map[string]any{
+		"plan_id":      hbResp.PendingPlans[0].PlanID,
+		"execution_id": hbResp.PendingPlans[0].ExecutionID,
+		"results":      results,
+	}, &tls.ConnectionState{PeerCertificates: []*x509.Certificate{cert}})
+	if resultRec.Code != http.StatusAccepted {
+		t.Fatalf("report result status=%d body=%s", resultRec.Code, resultRec.Body.String())
+	}
+
+	dedupRec := doJSON(t, app.Handler(), "POST", "/sites/"+siteID+"/plans", plainAPIKey, planPayload, nil)
+	if dedupRec.Code != http.StatusOK {
+		t.Fatalf("dedupe plan status=%d body=%s", dedupRec.Code, dedupRec.Body.String())
+	}
+	var dedupResp struct {
+		PlanStatus string `json:"plan_status"`
+	}
+	mustDecode(t, dedupRec.Body.Bytes(), &dedupResp)
+	if dedupResp.PlanStatus != "SUCCEEDED" {
+		t.Fatalf("expected final plan status SUCCEEDED, got %s", dedupResp.PlanStatus)
+	}
+
+	vmsRec := doJSON(t, app.Handler(), "GET", "/sites/"+siteID+"/vms", plainAPIKey, nil, nil)
+	if vmsRec.Code != http.StatusOK {
+		t.Fatalf("list vms status=%d body=%s", vmsRec.Code, vmsRec.Body.String())
+	}
+	var vmsResp struct {
+		VMs []store.MicroVM `json:"vms"`
+	}
+	mustDecode(t, vmsRec.Body.Bytes(), &vmsResp)
+	if len(vmsResp.VMs) == 0 {
+		t.Fatalf("expected at least one vm")
+	}
+
+	logsRec := doJSON(t, app.Handler(), "GET", "/executions/"+applyResp.Executions[0].ID+"/logs", plainAPIKey, nil, nil)
+	if logsRec.Code != http.StatusOK {
+		t.Fatalf("list logs status=%d body=%s", logsRec.Code, logsRec.Body.String())
+	}
+	var logsResp struct {
+		Logs []store.ExecutionLog `json:"logs"`
+	}
+	mustDecode(t, logsRec.Body.Bytes(), &logsResp)
+	if len(logsResp.Logs) != 1 {
+		t.Fatalf("expected 1 log entry, got %d", len(logsResp.Logs))
 	}
 }
 

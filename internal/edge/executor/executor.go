@@ -21,7 +21,7 @@ func (e *Executor) ExecutePlan(ctx context.Context, plan Plan) (PlanResult, erro
 	if strings.TrimSpace(plan.ExecutionID) == "" {
 		return PlanResult{}, errors.New("execution_id required")
 	}
-	result := PlanResult{ExecutionID: plan.ExecutionID, Results: make([]ActionResult, 0, len(plan.Actions))}
+	result := PlanResult{PlanID: plan.PlanID, ExecutionID: plan.ExecutionID, Results: make([]ActionResult, 0, len(plan.Actions))}
 
 	for _, action := range plan.Actions {
 		r := e.executeAction(ctx, plan.ExecutionID, action)

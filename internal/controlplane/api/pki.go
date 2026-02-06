@@ -20,10 +20,13 @@ type InternalCA struct {
 	certPEM []byte
 }
 
-func LoadOrCreateInternalCA(commonName string) (*InternalCA, error) {
+func LoadOrCreateInternalCA(commonName string, requirePersistent bool) (*InternalCA, error) {
 	certFile := os.Getenv("CA_CERT_FILE")
 	keyFile := os.Getenv("CA_KEY_FILE")
-	if certFile != "" && keyFile != "" {
+	if certFile != "" || keyFile != "" {
+		if certFile == "" || keyFile == "" {
+			return nil, errors.New("CA_CERT_FILE and CA_KEY_FILE must both be set")
+		}
 		certPEM, err := os.ReadFile(certFile)
 		if err != nil {
 			return nil, err
@@ -37,6 +40,9 @@ func LoadOrCreateInternalCA(commonName string) (*InternalCA, error) {
 			return nil, err
 		}
 		return &InternalCA{cert: cert, key: key, certPEM: certPEM}, nil
+	}
+	if requirePersistent {
+		return nil, errors.New("REQUIRE_PERSISTENT_PKI=true requires CA_CERT_FILE and CA_KEY_FILE")
 	}
 
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -114,13 +120,17 @@ func (c *InternalCA) SignAgentCSR(csrPEM []byte, agentID, tenantID, siteID strin
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), serialNum.String(), nil
 }
 
-func GenerateServerTLSCert() (tls.Certificate, error) {
-	if certFile := os.Getenv("SERVER_CERT_FILE"); certFile != "" {
-		keyFile := os.Getenv("SERVER_KEY_FILE")
-		if keyFile == "" {
-			return tls.Certificate{}, errors.New("SERVER_KEY_FILE is required when SERVER_CERT_FILE is set")
+func GenerateServerTLSCert(requirePersistent bool) (tls.Certificate, error) {
+	certFile := os.Getenv("SERVER_CERT_FILE")
+	keyFile := os.Getenv("SERVER_KEY_FILE")
+	if certFile != "" || keyFile != "" {
+		if certFile == "" || keyFile == "" {
+			return tls.Certificate{}, errors.New("SERVER_CERT_FILE and SERVER_KEY_FILE must both be set")
 		}
 		return tls.LoadX509KeyPair(certFile, keyFile)
+	}
+	if requirePersistent {
+		return tls.Certificate{}, errors.New("REQUIRE_PERSISTENT_PKI=true requires SERVER_CERT_FILE and SERVER_KEY_FILE")
 	}
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {

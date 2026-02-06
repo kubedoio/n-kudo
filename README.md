@@ -86,10 +86,7 @@ Implemented now:
 
 Partially implemented / placeholders:
 
-- `GET /v1/plans/next` currently returns empty plans
-- `POST /v1/executions/result` currently returns `202` without persistence logic
 - gRPC/proto contracts are defined (`api/proto/...`) but runtime server is HTTP/JSON
-- No background offline-state sweeper for stale heartbeats
 
 ## Control-Plane Commands
 
@@ -114,6 +111,12 @@ Environment variables from `internal/controlplane/api/config.go` and `internal/c
 | `ADMIN_KEY` | `dev-admin-key` | Admin bootstrap auth header (`X-Admin-Key`) |
 | `DEFAULT_ENROLLMENT_TTL` | `15m` | Enrollment token TTL |
 | `AGENT_CERT_TTL` | `24h` | Agent mTLS cert TTL |
+| `HEARTBEAT_INTERVAL` | `15s` | Agent heartbeat interval override returned by control-plane |
+| `PLAN_LEASE_TTL` | `45s` | Lease TTL for pending plans handed to an agent |
+| `MAX_PENDING_PLANS` | `2` | Max plans returned per heartbeat or `/v1/plans/next` |
+| `HEARTBEAT_OFFLINE_AFTER` | `60s` | Mark agents offline if heartbeat age exceeds this duration |
+| `OFFLINE_SWEEP_INTERVAL` | `15s` | Background sweeper cadence for offline-state transitions |
+| `REQUIRE_PERSISTENT_PKI` | `false` | If `true`, startup fails unless CA/server cert files are configured |
 | `HTTP_READ_TIMEOUT` | `10s` | Server read timeout |
 | `HTTP_WRITE_TIMEOUT` | `15s` | Server write timeout |
 | `HTTP_IDLE_TIMEOUT` | `60s` | Server idle timeout |
@@ -126,9 +129,9 @@ Environment variables from `internal/controlplane/api/config.go` and `internal/c
 
 Important TLS behavior:
 
-- If `CA_CERT_FILE`/`CA_KEY_FILE` are not set, an in-memory CA is generated at startup.
-- If `SERVER_CERT_FILE`/`SERVER_KEY_FILE` are not set, a self-signed server cert is generated at startup.
-- For stable mTLS trust across restarts, provide persistent CA and server cert material explicitly.
+- If `REQUIRE_PERSISTENT_PKI=false` (default) and cert files are not set, startup generates in-memory CA/server material for dev.
+- If `REQUIRE_PERSISTENT_PKI=true`, startup fails unless both `CA_CERT_FILE`+`CA_KEY_FILE` and `SERVER_CERT_FILE`+`SERVER_KEY_FILE` are set.
+- For non-dev deployments, set `REQUIRE_PERSISTENT_PKI=true` and provide persistent cert material.
 
 ## HTTP API Surface (Current)
 
@@ -157,8 +160,8 @@ Current routes are registered in `internal/controlplane/api/server.go`.
 - `POST /v1/heartbeat`
 - `POST /agents/logs`
 - `POST /v1/logs`
-- `GET /v1/plans/next` (placeholder: returns empty list)
-- `POST /v1/executions/result` (placeholder: returns `202`)
+- `GET /v1/plans/next`
+- `POST /v1/executions/result`
 
 ### Plan and status queries
 
@@ -304,11 +307,8 @@ The demo script performs tenant/site/token bootstrap, enrollment, heartbeats, pl
 
 ## Known Caveats (Current)
 
-- `run` mode depends on `/v1/plans/next` and `/v1/executions/result`, which are placeholder endpoints today.
-- Control-plane JSON decoder disallows unknown fields; keep payloads aligned with handler structs.
-- `internal/edge/enroll.HeartbeatRequest` currently includes fields (`tenant_id`, `site_id`, `host_id`, `sent_at`, `netbird_status`) that are not part of the strict `handleHeartbeat` request struct in `internal/controlplane/api/server.go`; verify `cmd/edge run` behavior against this server before relying on unattended loops.
-- Default TLS material is ephemeral unless CA/server cert files are provided.
-- `scripts/install-edge.sh` creates `/var/lib/nkudo-edge/runtime`, while edge binary default runtime directory is `/var/lib/nkudo-edge/vms` unless `--runtime-dir` is set.
+- Heartbeat/log ingestion endpoints intentionally allow unknown JSON fields for forward-compatibility; admin/tenant endpoints remain strict.
+- Default TLS material is ephemeral unless persistent cert files are provided or `REQUIRE_PERSISTENT_PKI=true` is set.
 
 ## Additional Docs
 
