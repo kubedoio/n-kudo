@@ -4,7 +4,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-OPS_DIR="${OPS_DIR:-/ops}"
+DEFAULT_OPS_DIR="/ops"
+FALLBACK_OPS_DIR="${REPO_ROOT}/ops"
+OPS_DIR="${OPS_DIR:-}"
 ENV_FILE="${OPS_DIR}/nkudo-demo.env"
 SOURCE_PLAN="${SOURCE_PLAN:-${REPO_ROOT}/examples/mvp1-demo-plan.json}"
 PREPARED_PLAN="${OPS_DIR}/mvp1-demo-plan.json"
@@ -17,6 +19,32 @@ need() {
     echo "missing required command: $1" >&2
     exit 1
   }
+}
+
+is_writable_dir() {
+  local dir="$1"
+  [[ -d "$dir" && -w "$dir" ]]
+}
+
+resolve_ops_dir() {
+  if [[ -n "$OPS_DIR" ]]; then
+    return
+  fi
+
+  if is_writable_dir "$DEFAULT_OPS_DIR"; then
+    OPS_DIR="$DEFAULT_OPS_DIR"
+    return
+  fi
+
+  if [[ ! -e "$DEFAULT_OPS_DIR" ]]; then
+    if mkdir -p "$DEFAULT_OPS_DIR" 2>/dev/null; then
+      chmod 0755 "$DEFAULT_OPS_DIR" || true
+      OPS_DIR="$DEFAULT_OPS_DIR"
+      return
+    fi
+  fi
+
+  OPS_DIR="$FALLBACK_OPS_DIR"
 }
 
 download() {
@@ -39,6 +67,10 @@ download() {
 
 main() {
   need jq
+  resolve_ops_dir
+  ENV_FILE="${OPS_DIR}/nkudo-demo.env"
+  PREPARED_PLAN="${OPS_DIR}/mvp1-demo-plan.json"
+
   if [[ ! -f "$SOURCE_PLAN" ]]; then
     echo "source plan not found: ${SOURCE_PLAN}" >&2
     exit 1
@@ -72,6 +104,13 @@ main() {
   rootfs_url="${ROOTFS_URL:-https://cloud-images.ubuntu.com/${UBUNTU_RELEASE}/current/${ubuntu_image_name}}"
 
   install -d -m 0755 "$OPS_DIR"
+  if [[ ! -w "$OPS_DIR" ]]; then
+    echo "ops directory is not writable: ${OPS_DIR}" >&2
+    echo "set OPS_DIR to a writable location or run with elevated permissions" >&2
+    exit 1
+  fi
+
+  echo "using ops dir: ${OPS_DIR}"
 
   if [[ ! -x "$ch_bin_path" ]]; then
     echo "downloading cloud-hypervisor from ${ch_url}"
