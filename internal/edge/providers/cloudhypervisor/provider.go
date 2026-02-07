@@ -522,8 +522,18 @@ func (p *Provider) prepareCloudInitISO(ctx context.Context, vmID, vmDir string, 
 			userPath,
 			metaPath,
 		}
+	} else if _, err := exec.LookPath("mkisofs"); err == nil {
+		cmd = []string{
+			"mkisofs",
+			"-output", isoPath,
+			"-volid", "cidata",
+			"-joliet",
+			"-rock",
+			userPath,
+			metaPath,
+		}
 	} else {
-		return "", errors.New("cloud-init ISO builder not found (need cloud-localds or genisoimage)")
+		return "", errors.New("cloud-init ISO builder not found (need cloud-localds, genisoimage, or mkisofs)")
 	}
 
 	if err := p.appendCommand(vmID, renderCommand(cmd[0], cmd[1:]...)); err != nil {

@@ -245,7 +245,7 @@ Runtime behavior:
 
 - Prepares per-VM runtime dir under `<runtime-dir>/<vm-id>`
 - Creates/clones VM disk
-- Builds cloud-init ISO using `cloud-localds` or fallback `genisoimage`
+- Builds cloud-init ISO using `cloud-localds` or fallback `genisoimage`/`mkisofs`
 - Creates TAP device and attaches to bridge (default bridge `br0`)
 - Starts `cloud-hypervisor` and tracks PID/status
 - Persists command log and VM metadata in runtime directory

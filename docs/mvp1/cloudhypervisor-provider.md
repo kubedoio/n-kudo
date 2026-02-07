@@ -13,7 +13,7 @@
 - MVP-1 provider uses host-installed binaries by default:
   - `cloud-hypervisor`
   - `ip`
-  - `cloud-localds` (preferred) or `genisoimage`
+- `cloud-localds` (preferred), `genisoimage`, or `mkisofs`
 - A static `cloud-hypervisor` binary is also supported by setting `Provider.Binary` to an absolute path.
 
 ## API Surface

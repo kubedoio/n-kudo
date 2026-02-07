@@ -21,6 +21,24 @@ need() {
   }
 }
 
+require_iso_builder() {
+  if command -v cloud-localds >/dev/null 2>&1 || command -v genisoimage >/dev/null 2>&1 || command -v mkisofs >/dev/null 2>&1; then
+    return
+  fi
+
+  echo "missing cloud-init ISO builder: install one of cloud-localds, genisoimage, or mkisofs" >&2
+  if command -v apt-get >/dev/null 2>&1; then
+    echo "hint (Debian/Ubuntu): sudo apt-get update && sudo apt-get install -y cloud-image-utils genisoimage" >&2
+  elif command -v dnf >/dev/null 2>&1; then
+    echo "hint (Fedora/RHEL): sudo dnf install -y cloud-utils-growpart genisoimage" >&2
+  elif command -v yum >/dev/null 2>&1; then
+    echo "hint (CentOS/RHEL): sudo yum install -y cloud-utils-growpart genisoimage" >&2
+  elif command -v brew >/dev/null 2>&1; then
+    echo "hint (macOS): brew install cloud-image-utils cdrtools" >&2
+  fi
+  exit 1
+}
+
 is_writable_dir() {
   local dir="$1"
   [[ -d "$dir" && -w "$dir" ]]
@@ -67,6 +85,7 @@ download() {
 
 main() {
   need jq
+  require_iso_builder
   resolve_ops_dir
   ENV_FILE="${OPS_DIR}/nkudo-demo.env"
   PREPARED_PLAN="${OPS_DIR}/mvp1-demo-plan.json"

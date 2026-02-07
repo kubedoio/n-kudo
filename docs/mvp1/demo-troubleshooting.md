@@ -40,11 +40,11 @@ Notes:
 
 Symptom:
 - `cloud-hypervisor binary not found`
-- `cloud-init ISO builder not found (need cloud-localds or genisoimage)`
+- `cloud-init ISO builder not found (need cloud-localds, genisoimage, or mkisofs)`
 
 Fix:
 - Install `cloud-hypervisor`.
-- Install either `cloud-localds` (cloud-image-utils) or `genisoimage`.
+- Install one of: `cloud-localds` (cloud-image-utils), `genisoimage`, or `mkisofs`.
 
 ## Network bridge/TAP errors
 

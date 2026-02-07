@@ -87,8 +87,8 @@ MSG
   fi
 
   need ip
-  if ! command -v cloud-localds >/dev/null 2>&1 && ! command -v genisoimage >/dev/null 2>&1; then
-    echo "need either cloud-localds or genisoimage in PATH" >&2
+  if ! command -v cloud-localds >/dev/null 2>&1 && ! command -v genisoimage >/dev/null 2>&1 && ! command -v mkisofs >/dev/null 2>&1; then
+    echo "need one of cloud-localds, genisoimage, or mkisofs in PATH" >&2
     exit 1
   fi
   if ! command -v "$CLOUD_HYPERVISOR_BIN" >/dev/null 2>&1; then
