@@ -1,0 +1,18 @@
+# =============================================================================
+# Grafana Dashboards Provisioning Configuration
+# =============================================================================
+
+apiVersion: 1
+
+providers:
+  - name: 'n-kudo'
+    orgId: 1
+    folder: 'n-kudo'
+    folderUid: ''
+    type: file
+    disableDeletion: false
+    editable: true
+    updateIntervalSeconds: 10
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards

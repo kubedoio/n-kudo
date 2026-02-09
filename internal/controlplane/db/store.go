@@ -55,11 +55,13 @@ type MicroVM struct {
 }
 
 type APIKey struct {
-	ID        string
-	TenantID  string
-	Name      string
-	KeyHash   string
-	ExpiresAt *time.Time
+	ID         string     `json:"id"`
+	TenantID   string     `json:"tenant_id"`
+	Name       string     `json:"name"`
+	KeyHash    string     `json:"-"` // Note: KeyHash is intentionally omitted from JSON
+	CreatedAt  time.Time  `json:"created_at"`
+	ExpiresAt  *time.Time `json:"expires_at,omitempty"`
+	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
 }
 
 type EnrollmentToken struct {
@@ -68,6 +70,17 @@ type EnrollmentToken struct {
 	SiteID    string
 	TokenHash string
 	ExpiresAt time.Time
+}
+
+type EnrollmentTokenWithStatus struct {
+	ID                string     `json:"id"`
+	SiteID            string     `json:"site_id"`
+	SiteName          string     `json:"site_name"`
+	CreatedAt         time.Time  `json:"created_at"`
+	ExpiresAt         time.Time  `json:"expires_at"`
+	Consumed          bool       `json:"consumed"`
+	ConsumedAt        *time.Time `json:"consumed_at,omitempty"`
+	ConsumedByAgentID *string    `json:"consumed_by_agent_id,omitempty"`
 }
 
 type Agent struct {
@@ -95,6 +108,7 @@ type Plan struct {
 	OperationsJSON []byte      `json:"operations_json"`
 	CreatedAt      time.Time   `json:"created_at"`
 	Executions     []Execution `json:"executions,omitempty"`
+	Deduplicated   bool        `json:"deduplicated,omitempty"`
 }
 
 type PlanAction struct {
@@ -128,6 +142,19 @@ type Execution struct {
 	UpdatedAt     time.Time  `json:"updated_at"`
 	StartedAt     *time.Time `json:"started_at,omitempty"`
 	CompletedAt   *time.Time `json:"completed_at,omitempty"`
+}
+
+type ExecutionWithTimestamps struct {
+	ID            string    `json:"id"`
+	PlanID        string    `json:"plan_id"`
+	OperationID   string    `json:"operation_id"`
+	OperationType string    `json:"operation_type"`
+	State         string    `json:"state"`
+	VMID          string    `json:"vm_id"`
+	ErrorCode     *string   `json:"error_code,omitempty"`
+	ErrorMessage  *string   `json:"error_message,omitempty"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }
 
 type ExecutionLog struct {
@@ -192,6 +219,15 @@ type APIKeyValidation struct {
 	TenantID string
 }
 
+type CertificateHistory struct {
+	ID           string     `json:"id"`
+	AgentID      string     `json:"agent_id"`
+	Serial       string     `json:"serial"`
+	IssuedAt     time.Time  `json:"issued_at"`
+	ExpiresAt    time.Time  `json:"expires_at"`
+	RevokedAt    *time.Time `json:"revoked_at,omitempty"`
+}
+
 type ApplyPlanInput struct {
 	TenantID        string
 	SiteID          string
@@ -235,7 +271,69 @@ type TokenConsumeResult struct {
 	SiteID   string
 }
 
+// AuditEvent represents an audit log entry with chain integrity support
+type AuditEvent struct {
+	ID           int64     `json:"id"`
+	TenantID     string    `json:"tenant_id"`
+	SiteID       string    `json:"site_id,omitempty"`
+	ActorType    string    `json:"actor_type"`
+	ActorUserID  *string   `json:"actor_user_id,omitempty"`
+	ActorAgentID *string   `json:"actor_agent_id,omitempty"`
+	Action       string    `json:"action"`
+	ResourceType string    `json:"resource_type"`
+	ResourceID   string    `json:"resource_id"`
+	RequestID    string    `json:"request_id,omitempty"`
+	SourceIP     string    `json:"source_ip,omitempty"`
+	MetadataJSON []byte    `json:"metadata_json,omitempty"`
+	OccurredAt   time.Time `json:"occurred_at"`
+	// Chain integrity fields
+	PrevHash   string `json:"prev_hash"`
+	EntryHash  string `json:"entry_hash"`
+	ChainValid bool   `json:"chain_valid"`
+}
+
+// TenantUsage represents current resource usage for a tenant
+type TenantUsage struct {
+	Sites       int `json:"sites"`
+	Agents      int `json:"agents"`
+	VMs         int `json:"vms"`
+	ActivePlans int `json:"active_plans"`
+	APIKeys     int `json:"api_keys"`
+}
+
+// QuotaLimits represents quota limits for a tenant
+type QuotaLimits struct {
+	MaxSites           int `json:"max_sites"`
+	MaxAgentsPerSite   int `json:"max_agents_per_site"`
+	MaxVMsPerAgent     int `json:"max_vms_per_agent"`
+	MaxConcurrentPlans int `json:"max_concurrent_plans"`
+	MaxAPIKeys         int `json:"max_api_keys"`
+}
+
+// AuditEventInput represents the input for creating a new audit event
+type AuditEventInput struct {
+	TenantID     string
+	SiteID       string
+	ActorType    string
+	ActorID      string
+	Action       string
+	ResourceType string
+	ResourceID   string
+	RequestID    string
+	SourceIP     string
+	Metadata     []byte
+}
+
+// CRLEntry represents a revoked certificate entry
+type CRLEntry struct {
+	SerialNumber string    `json:"serial_number"`
+	RevokedAt    time.Time `json:"revoked_at"`
+	Reason       int       `json:"reason"`
+	AgentID      string    `json:"agent_id,omitempty"`
+}
+
 type Repo interface {
+	Close() error
 	CreateTenant(ctx context.Context, t Tenant) (Tenant, error)
 	CreateAPIKey(ctx context.Context, key APIKey) (APIKey, error)
 	ValidateAPIKey(ctx context.Context, keyHash string) (APIKeyValidation, error)
@@ -257,4 +355,28 @@ type Repo interface {
 	WriteAudit(ctx context.Context, tenantID, siteID, actorType, actorID, action, resourceType, resourceID, requestID, sourceIP string, metadata []byte) error
 	SiteBelongsToTenant(ctx context.Context, siteID, tenantID string) (bool, error)
 	ExecutionBelongsToTenant(ctx context.Context, executionID, tenantID string) (bool, error)
+	ListEnrollmentTokens(ctx context.Context, tenantID string) ([]EnrollmentTokenWithStatus, error)
+	ListExecutions(ctx context.Context, tenantID, siteID string, statuses []string, limit int) ([]ExecutionWithTimestamps, error)
+	ListAPIKeys(ctx context.Context, tenantID string) ([]APIKey, error)
+	DeleteAPIKey(ctx context.Context, tenantID, keyID string) error
+	UnenrollAgent(ctx context.Context, agentID string) error
+	UpdateAgentCertificate(ctx context.Context, agentID, certSerial, refreshTokenHash string) error
+	ListCertificateHistory(ctx context.Context, agentID string, limit int) ([]CertificateHistory, error)
+	RecordCertificateIssuance(ctx context.Context, history CertificateHistory) error
+
+	// Audit chain integrity methods
+	GetLastAuditEvent(ctx context.Context) (*AuditEvent, error)
+	WriteAuditEvent(ctx context.Context, event *AuditEvent) error
+	UpdateAuditEventValidity(ctx context.Context, id int64, valid bool) error
+	ListAuditEvents(ctx context.Context, tenantID string, limit int) ([]AuditEvent, error)
+
+	// CRL methods
+	RevokeCertificate(ctx context.Context, serial string, reason int, agentID string) error
+	IsCertificateRevoked(ctx context.Context, serial string) (bool, error)
+	ListRevokedCertificates(ctx context.Context) ([]CRLEntry, error)
+
+	// Tenant quota and usage methods
+	GetTenantUsage(ctx context.Context, tenantID string) (*TenantUsage, error)
+	GetTenantLimits(ctx context.Context, tenantID string) (*QuotaLimits, error)
+	SetTenantLimits(ctx context.Context, tenantID string, limits QuotaLimits) error
 }

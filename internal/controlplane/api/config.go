@@ -23,6 +23,7 @@ type Config struct {
 	IdleTimeout          time.Duration
 	ShutdownTimeout      time.Duration
 	CACommonName         string
+	RateLimit            RateLimitConfig
 }
 
 func LoadConfig() Config {
@@ -43,6 +44,7 @@ func LoadConfig() Config {
 		IdleTimeout:          envDuration("HTTP_IDLE_TIMEOUT", 60*time.Second),
 		ShutdownTimeout:      envDuration("HTTP_SHUTDOWN_TIMEOUT", 10*time.Second),
 		CACommonName:         env("CA_COMMON_NAME", "n-kudo-mvp1-agent-ca"),
+		RateLimit:            DefaultRateLimitConfig(),
 	}
 }
 

@@ -1,8 +1,0 @@
-# test log
-getenv TMPDIR
-stat /var/folders/w8/09p__rt95t31x21hj0mbvf340000gn/T/TestExecutorIdempotencyByActionID1859819199/001/state
-stat /var/folders/w8/09p__rt95t31x21hj0mbvf340000gn/T/TestExecutorIdempotencyByActionID1859819199/001
-open /var/folders/w8/09p__rt95t31x21hj0mbvf340000gn/T/TestExecutorIdempotencyByActionID1859819199/001/state/edge-state.json
-open /var/folders/w8/09p__rt95t31x21hj0mbvf340000gn/T/TestExecutorIdempotencyByActionID1859819199/001/state/edge-state.json.tmp
-stat /var/folders/w8/09p__rt95t31x21hj0mbvf340000gn/T/TestExecutorIdempotencyByActionID1859819199/001/state/edge-state.json
-open /var/folders/w8/09p__rt95t31x21hj0mbvf340000gn/T

@@ -22,6 +22,7 @@ type MemoryRepo struct {
 	apiKeysByHash map[string]APIKey
 	tokensByHash  map[string]EnrollmentToken
 	tokenUsed     map[string]bool
+	tokenCreated  map[string]time.Time
 
 	plans             map[string]Plan
 	planActions       map[string][]PlanAction
@@ -31,6 +32,7 @@ type MemoryRepo struct {
 	executionLogs     map[string][]ExecutionLog
 	microVMs          map[string]MicroVM
 	audits            []AuditRecord
+	crlEntries        map[string]*CRLEntry
 }
 
 type planLease struct {
@@ -60,6 +62,7 @@ func NewMemoryRepo() *MemoryRepo {
 		apiKeysByHash:     map[string]APIKey{},
 		tokensByHash:      map[string]EnrollmentToken{},
 		tokenUsed:         map[string]bool{},
+		tokenCreated:      map[string]time.Time{},
 		plans:             map[string]Plan{},
 		planActions:       map[string][]PlanAction{},
 		planLeases:        map[string]planLease{},
@@ -68,7 +71,13 @@ func NewMemoryRepo() *MemoryRepo {
 		executionLogs:     map[string][]ExecutionLog{},
 		microVMs:          map[string]MicroVM{},
 		audits:            []AuditRecord{},
+		crlEntries:        map[string]*CRLEntry{},
 	}
+}
+
+// Close is a no-op for MemoryRepo since it doesn't hold external resources.
+func (m *MemoryRepo) Close() error {
+	return nil
 }
 
 func (m *MemoryRepo) CreateTenant(_ context.Context, t Tenant) (Tenant, error) {
@@ -112,6 +121,40 @@ func (m *MemoryRepo) ValidateAPIKey(_ context.Context, keyHash string) (APIKeyVa
 	return APIKeyValidation{TenantID: key.TenantID}, nil
 }
 
+func (m *MemoryRepo) ListAPIKeys(_ context.Context, tenantID string) ([]APIKey, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]APIKey, 0)
+	for _, key := range m.apiKeysByHash {
+		if key.TenantID == tenantID {
+			out = append(out, key)
+		}
+	}
+	// Sort by CreatedAt descending
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
+	return out, nil
+}
+
+func (m *MemoryRepo) DeleteAPIKey(_ context.Context, tenantID, keyID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	// Find the key by ID and tenant
+	found := false
+	var keyHashToDelete string
+	for hash, key := range m.apiKeysByHash {
+		if key.ID == keyID && key.TenantID == tenantID {
+			found = true
+			keyHashToDelete = hash
+			break
+		}
+	}
+	if !found {
+		return ErrNotFound
+	}
+	delete(m.apiKeysByHash, keyHashToDelete)
+	return nil
+}
+
 func (m *MemoryRepo) CreateSite(_ context.Context, site Site) (Site, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -150,6 +193,7 @@ func (m *MemoryRepo) IssueEnrollmentToken(_ context.Context, token EnrollmentTok
 	}
 	m.tokensByHash[token.TokenHash] = token
 	m.tokenUsed[token.ID] = false
+	m.tokenCreated[token.ID] = time.Now().UTC()
 	return token, nil
 }
 
@@ -669,6 +713,97 @@ func (m *MemoryRepo) ExecutionBelongsToTenant(_ context.Context, executionID, te
 	return ok && e.TenantID == tenantID, nil
 }
 
+func (m *MemoryRepo) ListExecutions(_ context.Context, tenantID, siteID string, statuses []string, limit int) ([]ExecutionWithTimestamps, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if limit <= 0 || limit > 1000 {
+		limit = 50
+	}
+	statusMap := make(map[string]struct{})
+	for _, s := range statuses {
+		statusMap[strings.ToUpper(strings.TrimSpace(s))] = struct{}{}
+	}
+	out := make([]ExecutionWithTimestamps, 0)
+	for _, e := range m.executions {
+		if e.TenantID != tenantID || e.SiteID != siteID {
+			continue
+		}
+		if len(statusMap) > 0 {
+			if _, ok := statusMap[e.State]; !ok {
+				continue
+			}
+		}
+		execWithTs := ExecutionWithTimestamps{
+			ID:            e.ID,
+			PlanID:        e.PlanID,
+			OperationID:   e.OperationID,
+			OperationType: e.OperationType,
+			State:         e.State,
+			VMID:          e.VMID,
+			UpdatedAt:     e.UpdatedAt,
+		}
+		if e.ErrorCode != "" {
+			errCode := e.ErrorCode
+			execWithTs.ErrorCode = &errCode
+		}
+		if e.ErrorMessage != "" {
+			errMsg := e.ErrorMessage
+			execWithTs.ErrorMessage = &errMsg
+		}
+		// Get CreatedAt from plan if available
+		if plan, ok := m.plans[e.PlanID]; ok {
+			execWithTs.CreatedAt = plan.CreatedAt
+		}
+		out = append(out, execWithTs)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+func (m *MemoryRepo) ListEnrollmentTokens(_ context.Context, tenantID string) ([]EnrollmentTokenWithStatus, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	out := make([]EnrollmentTokenWithStatus, 0)
+	for _, token := range m.tokensByHash {
+		if token.TenantID != tenantID {
+			continue
+		}
+		site, ok := m.sites[token.SiteID]
+		if !ok {
+			continue
+		}
+
+		t := EnrollmentTokenWithStatus{
+			ID:        token.ID,
+			SiteID:    token.SiteID,
+			SiteName:  site.Name,
+			CreatedAt: m.tokenCreated[token.ID],
+			ExpiresAt: token.ExpiresAt,
+			Consumed:  m.tokenUsed[token.ID],
+		}
+
+		// Find consumed_at and agent_id by looking up agents
+		for _, agent := range m.agents {
+			if agent.SiteID == token.SiteID {
+				t.ConsumedByAgentID = &agent.ID
+				if agent.LastHeartbeatAt != nil {
+					t.ConsumedAt = agent.LastHeartbeatAt
+				}
+				break
+			}
+		}
+
+		out = append(out, t)
+	}
+
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
+	return out, nil
+}
+
 func (m *MemoryRepo) planHasPendingExecutionsLocked(planID string) bool {
 	for _, exec := range m.executions {
 		if exec.PlanID != planID {
@@ -841,4 +976,246 @@ func chooseString(v, fallback string) string {
 		return fallback
 	}
 	return v
+}
+
+func (m *MemoryRepo) UnenrollAgent(_ context.Context, agentID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	agent, ok := m.agents[agentID]
+	if !ok {
+		return ErrNotFound
+	}
+	agent.State = "UNENROLLED"
+	agent.CertSerial = ""
+	agent.RefreshTokenHash = ""
+	m.agents[agentID] = agent
+	return nil
+}
+
+func (m *MemoryRepo) UpdateAgentCertificate(_ context.Context, agentID, certSerial, refreshTokenHash string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	agent, ok := m.agents[agentID]
+	if !ok {
+		return ErrNotFound
+	}
+	agent.CertSerial = certSerial
+	agent.RefreshTokenHash = refreshTokenHash
+	m.agents[agentID] = agent
+	return nil
+}
+
+// In-memory storage for certificate history
+type certHistoryEntry struct {
+	CertificateHistory
+}
+
+var certHistoryStore = struct {
+	sync.Mutex
+	entries map[string][]certHistoryEntry
+}{entries: make(map[string][]certHistoryEntry)}
+
+func (m *MemoryRepo) ListCertificateHistory(_ context.Context, agentID string, limit int) ([]CertificateHistory, error) {
+	certHistoryStore.Lock()
+	defer certHistoryStore.Unlock()
+
+	if limit <= 0 || limit > 1000 {
+		limit = 50
+	}
+
+	entries, ok := certHistoryStore.entries[agentID]
+	if !ok {
+		return []CertificateHistory{}, nil
+	}
+
+	out := make([]CertificateHistory, 0, min(limit, len(entries)))
+	for i := len(entries) - 1; i >= 0 && len(out) < limit; i-- {
+		out = append(out, entries[i].CertificateHistory)
+	}
+	return out, nil
+}
+
+func (m *MemoryRepo) RecordCertificateIssuance(_ context.Context, history CertificateHistory) error {
+	certHistoryStore.Lock()
+	defer certHistoryStore.Unlock()
+
+	if history.ID == "" {
+		history.ID = uuid.NewString()
+	}
+
+	certHistoryStore.entries[history.AgentID] = append(certHistoryStore.entries[history.AgentID], certHistoryEntry{history})
+	return nil
+}
+
+// crlEntryKey is used as a key for the revoked certificates map
+type crlEntryKey struct {
+	serial string
+}
+
+// RevokeCertificate adds a certificate to the revocation list
+func (m *MemoryRepo) RevokeCertificate(_ context.Context, serial string, reason int, agentID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.crlEntries == nil {
+		m.crlEntries = make(map[string]*CRLEntry)
+	}
+	m.crlEntries[serial] = &CRLEntry{
+		SerialNumber: serial,
+		RevokedAt:    time.Now().UTC(),
+		Reason:       reason,
+		AgentID:      agentID,
+	}
+	return nil
+}
+
+// IsCertificateRevoked checks if a certificate serial is revoked
+func (m *MemoryRepo) IsCertificateRevoked(_ context.Context, serial string) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.crlEntries == nil {
+		return false, nil
+	}
+	_, exists := m.crlEntries[serial]
+	return exists, nil
+}
+
+// ListRevokedCertificates returns all revoked certificates
+func (m *MemoryRepo) ListRevokedCertificates(_ context.Context) ([]CRLEntry, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]CRLEntry, 0, len(m.crlEntries))
+	for _, entry := range m.crlEntries {
+		out = append(out, *entry)
+	}
+	return out, nil
+}
+
+// GetTenantLimits returns the quota limits for a tenant
+func (m *MemoryRepo) GetTenantLimits(_ context.Context, tenantID string) (*QuotaLimits, error) {
+	// MemoryRepo returns default limits
+	defaultLimits := QuotaLimits{
+		MaxSites:           10,
+		MaxAgentsPerSite:   100,
+		MaxVMsPerAgent:     50,
+		MaxConcurrentPlans: 100,
+		MaxAPIKeys:         20,
+	}
+	return &defaultLimits, nil
+}
+
+// SetTenantLimits sets the quota limits for a tenant
+func (m *MemoryRepo) SetTenantLimits(_ context.Context, tenantID string, limits QuotaLimits) error {
+	// MemoryRepo stores limits in memory - for now just accept the call
+	return nil
+}
+
+// GetTenantUsage returns current resource usage counts for a tenant
+func (m *MemoryRepo) GetTenantUsage(_ context.Context, tenantID string) (*TenantUsage, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	usage := &TenantUsage{}
+
+	// Count sites
+	for _, site := range m.sites {
+		if site.TenantID == tenantID {
+			usage.Sites++
+		}
+	}
+
+	// Count agents
+	for _, agent := range m.agents {
+		if agent.TenantID == tenantID {
+			usage.Agents++
+		}
+	}
+
+	// Count VMs
+	for _, vm := range m.microVMs {
+		if vm.TenantID == tenantID {
+			usage.VMs++
+		}
+	}
+
+	// Count active plans
+	for _, plan := range m.plans {
+		if plan.TenantID == tenantID && (plan.Status == "PENDING" || plan.Status == "IN_PROGRESS") {
+			usage.ActivePlans++
+		}
+	}
+
+	// Count API keys
+	for _, key := range m.apiKeysByHash {
+		if key.TenantID == tenantID {
+			usage.APIKeys++
+		}
+	}
+
+	return usage, nil
+}
+
+// GetLastAuditEvent returns the last audit event for chain integrity
+func (m *MemoryRepo) GetLastAuditEvent(_ context.Context) (*AuditEvent, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	// MemoryRepo uses simple AuditRecord, not full AuditEvent chain
+	return nil, nil
+}
+
+// WriteAuditEvent writes a full audit event with chain integrity
+func (m *MemoryRepo) WriteAuditEvent(_ context.Context, event *AuditEvent) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	// MemoryRepo uses simple AuditRecord, convert and store
+	actorID := ""
+	if event.ActorUserID != nil {
+		actorID = *event.ActorUserID
+	} else if event.ActorAgentID != nil {
+		actorID = *event.ActorAgentID
+	}
+	m.audits = append(m.audits, AuditRecord{
+		TenantID:     event.TenantID,
+		SiteID:       event.SiteID,
+		ActorType:    event.ActorType,
+		ActorID:      actorID,
+		Action:       event.Action,
+		ResourceType: event.ResourceType,
+		ResourceID:   event.ResourceID,
+		RequestID:    event.RequestID,
+		SourceIP:     event.SourceIP,
+		Metadata:     event.MetadataJSON,
+	})
+	return nil
+}
+
+// UpdateAuditEventValidity updates the chain validity of an audit event
+func (m *MemoryRepo) UpdateAuditEventValidity(_ context.Context, id int64, valid bool) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	// MemoryRepo doesn't track chain validity per event
+	return nil
+}
+
+// ListAuditEvents returns audit events for a tenant
+func (m *MemoryRepo) ListAuditEvents(_ context.Context, tenantID string, limit int) ([]AuditEvent, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	events := make([]AuditEvent, 0)
+	for i := len(m.audits) - 1; i >= 0 && len(events) < limit; i-- {
+		audit := m.audits[i]
+		if tenantID == "" || audit.TenantID == tenantID {
+			events = append(events, AuditEvent{
+				TenantID:     audit.TenantID,
+				SiteID:       audit.SiteID,
+				ActorType:    audit.ActorType,
+				Action:       audit.Action,
+				ResourceType: audit.ResourceType,
+				ResourceID:   audit.ResourceID,
+				RequestID:    audit.RequestID,
+				SourceIP:     audit.SourceIP,
+				MetadataJSON: audit.Metadata,
+			})
+		}
+	}
+	return events, nil
 }

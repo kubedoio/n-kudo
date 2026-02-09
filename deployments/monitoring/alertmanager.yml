@@ -1,0 +1,221 @@
+# =============================================================================
+# n-kudo Alertmanager Configuration
+# =============================================================================
+# This file configures alert routing and notification for n-kudo.
+#
+# Environment Variables:
+#   - ALERTMANAGER_SMTP_FROM:     Email sender address
+#   - ALERTMANAGER_SMTP_HOST:     SMTP server host:port
+#   - ALERTMANAGER_SMTP_USER:     SMTP username
+#   - ALERTMANAGER_SMTP_PASS:     SMTP password
+#   - ALERTMANAGER_PD_SERVICE_KEY: PagerDuty service key (critical alerts)
+#   - ALERTMANAGER_SLACK_WEBHOOK:  Slack webhook URL (warning alerts)
+#
+# Usage:
+#   Set environment variables and start alertmanager with this config.
+# =============================================================================
+
+global:
+  # SMTP settings for email notifications
+  smtp_from: "{{ .Env.ALERTMANAGER_SMTP_FROM | default \"alerts@nkudo.io\" }}"
+  smtp_smarthost: "{{ .Env.ALERTMANAGER_SMTP_HOST | default \"smtp.example.com:587\" }}"
+  smtp_auth_username: "{{ .Env.ALERTMANAGER_SMTP_USER | default \"\" }}"
+  smtp_auth_password: "{{ .Env.ALERTMANAGER_SMTP_PASS | default \"\" }}"
+  smtp_require_tls: true
+  
+  # Resolve timeout - alerts auto-resolve if condition clears
+  resolve_timeout: 5m
+
+  # External URL where Alertmanager is reachable
+  external_url: "https://alertmanager.nkudo.io"
+
+# Templates for notification messages
+templates:
+  - '/etc/alertmanager/templates/*.tmpl'
+
+# Inhibition rules - suppress lower severity alerts when higher severity exists
+inhibit_rules:
+  # Suppress warnings if critical alert for same service/component fires
+  - source_match:
+      severity: 'critical'
+    target_match:
+      severity: 'warning'
+    equal:
+      - service
+      - component
+      - instance
+
+  # Suppress info if warning exists for same alert
+  - source_match:
+      severity: 'warning'
+    target_match:
+      severity: 'info'
+    equal:
+      - alertname
+      - service
+
+# Routing tree - determines which receiver handles each alert
+route:
+  # Default receiver
+  receiver: 'email-default'
+  
+  # Group alerts by these labels
+  group_by: ['alertname', 'service', 'component', 'severity']
+  
+  # Wait before sending first notification for a group
+  group_wait: 30s
+  
+  # Interval between notifications for the same group
+  group_interval: 5m
+  
+  # Interval before re-sending resolved notification
+  repeat_interval: 4h
+  
+  # Child routes
+  routes:
+    # Critical alerts -> PagerDuty (immediate)
+    - match:
+        severity: critical
+      receiver: pagerduty-critical
+      group_wait: 0s
+      group_interval: 2m
+      repeat_interval: 1h
+      continue: true  # Also send to email
+
+    # Warning alerts -> Slack
+    - match:
+        severity: warning
+      receiver: slack-warnings
+      group_wait: 1m
+      group_interval: 5m
+      repeat_interval: 2h
+      continue: true  # Also send to email
+
+    # Info alerts -> Log only (no email)
+    - match:
+        severity: info
+      receiver: null-receiver
+      continue: false
+
+    # Database alerts -> Database team
+    - match:
+        component: database
+      receiver: email-dba-team
+      group_wait: 15s
+      continue: true
+
+    # PKI/Certificate alerts -> Security team
+    - match:
+        component: pki
+      receiver: email-security-team
+      group_wait: 0s
+      continue: true
+
+    # Edge agent alerts -> Edge operations
+    - match:
+        component: agents
+      receiver: slack-edge-ops
+      group_wait: 2m
+      continue: true
+
+# Receivers - notification destinations
+receivers:
+  # Null receiver (discards alerts)
+  - name: null-receiver
+
+  # Default email receiver
+  - name: email-default
+    email_configs:
+      - to: 'ops-team@nkudo.io'
+        subject: '[{{ .Status | toUpper }}:{{ .CommonLabels.severity | toUpper }}] {{ .CommonAnnotations.summary }}'
+        body: |
+          {{ range .Alerts }}
+          Alert: {{ .Annotations.summary }}
+          Description: {{ .Annotations.description }}
+          Severity: {{ .Labels.severity }}
+          Service: {{ .Labels.service }}
+          Component: {{ .Labels.component }}
+          Instance: {{ .Labels.instance }}
+          
+          {{ if .Annotations.runbook_url }}Runbook: {{ .Annotations.runbook_url }}{{ end }}
+          {{ if .Annotations.dashboard_url }}Dashboard: {{ .Annotations.dashboard_url }}{{ end }}
+          
+          Starts at: {{ .StartsAt }}
+          {{ if .EndsAt }}Ends at: {{ .EndsAt }}{{ end }}
+          ---
+          {{ end }}
+        send_resolved: true
+        headers:
+          X-Priority: '{{ if eq .CommonLabels.severity "critical" }}1{{ else }}3{{ end }}'
+
+  # PagerDuty for critical alerts
+  - name: pagerduty-critical
+    pagerduty_configs:
+      - service_key: '{{ .Env.ALERTMANAGER_PD_SERVICE_KEY | default "PLACEHOLDER_PD_KEY" }}'
+        description: '{{ .CommonAnnotations.summary }}'
+        severity: critical
+        details:
+          firing: '{{ template "pagerduty.default.description" . }}'
+          resolved: '{{ template "pagerduty.default.description" . }}'
+          dashboard_url: '{{ .CommonAnnotations.dashboard_url }}'
+          runbook_url: '{{ .CommonAnnotations.runbook_url }}'
+        links:
+          - href: '{{ .CommonAnnotations.dashboard_url | default "https://grafana.nkudo.io" }}'
+            text: Grafana Dashboard
+          - href: '{{ .CommonAnnotations.runbook_url | default "https://docs.nkudo.io/runbooks" }}'
+            text: Runbook
+
+  # Slack for warning alerts
+  - name: slack-warnings
+    slack_configs:
+      - api_url: '{{ .Env.ALERTMANAGER_SLACK_WEBHOOK | default "https://hooks.slack.com/services/PLACEHOLDER/PLACEHOLDER/PLACEHOLDER" }}'
+        channel: '#nkudo-alerts'
+        username: 'Alertmanager'
+        icon_emoji: ':warning:'
+        title: '[{{ .Status | toUpper }}:{{ .CommonLabels.severity | toUpper }}] {{ .CommonAnnotations.summary }}'
+        title_link: '{{ .CommonAnnotations.dashboard_url | default "https://grafana.nkudo.io" }}'
+        text: |
+          {{ range .Alerts }}
+          *Alert:* {{ .Annotations.summary }}
+          *Description:* {{ .Annotations.description }}
+          *Service:* {{ .Labels.service }}
+          *Component:* {{ .Labels.component }}
+          {{ if .Labels.instance }}*Instance:* {{ .Labels.instance }}{{ end }}
+          {{ if .Annotations.runbook_url }}*Runbook:* <{{ .Annotations.runbook_url }}|View Runbook>{{ end }}
+          {{ end }}
+        footer: 'n-kudo Alertmanager'
+        fallback: '{{ .CommonAnnotations.summary }}'
+        callback_id: '{{ .GroupLabels.alertname }}'
+        send_resolved: true
+        actions:
+          - type: button
+            text: 'View Dashboard'
+            url: '{{ .CommonAnnotations.dashboard_url | default "https://grafana.nkudo.io" }}'
+          - type: button
+            text: 'View Runbook'
+            url: '{{ .CommonAnnotations.runbook_url | default "https://docs.nkudo.io/runbooks" }}'
+
+  # DBA team email
+  - name: email-dba-team
+    email_configs:
+      - to: 'dba-team@nkudo.io'
+        subject: '[DB ALERT:{{ .Status | toUpper }}] {{ .CommonAnnotations.summary }}'
+        send_resolved: true
+
+  # Security team email
+  - name: email-security-team
+    email_configs:
+      - to: 'security-team@nkudo.io'
+        subject: '[SECURITY ALERT:{{ .Status | toUpper }}] {{ .CommonAnnotations.summary }}'
+        send_resolved: true
+
+  # Edge operations Slack
+  - name: slack-edge-ops
+    slack_configs:
+      - api_url: '{{ .Env.ALERTMANAGER_SLACK_WEBHOOK | default "https://hooks.slack.com/services/PLACEHOLDER/PLACEHOLDER/PLACEHOLDER" }}'
+        channel: '#edge-operations'
+        username: 'Edge Monitor'
+        icon_emoji: ':satellite_antenna:'
+        title: '[EDGE {{ .Status | toUpper }}] {{ .CommonAnnotations.summary }}'
+        text: '{{ range .Alerts }}{{ .Annotations.description }}{{ end }}'
+        send_resolved: true

@@ -1,0 +1,77 @@
+-----BEGIN PGP SIGNED MESSAGE-----
+Hash: SHA512
+
+{
+  "manifestVersion": "2.0.0",
+  "signatureType": "grafana",
+  "signedByOrg": "grafana",
+  "signedByOrgName": "Grafana Labs",
+  "plugin": "grafana-clock-panel",
+  "version": "3.2.1",
+  "time": 1768214072411,
+  "keyId": "7e4d0c6a708866e7",
+  "files": {
+    "LICENSE": "b46400c1ab5630edeb4e43b240a027d203375ebe5a9efb7de88c604c5c5cace0",
+    "394.js": "86218915ebe64aa41ff21ee7f543081e7675ed995bbe59335dd448a50cfa3be7",
+    "module.js": "55639ded661056f85f137ea99dbbd91e8206db92243bd69a5d827054a9c7e77f",
+    "898.js": "953c8267eaf213d6f06951b586a17265807f7c68d10b1fbffea7919477a6e6cb",
+    "156.js.map": "fa2ea33a176206cd26dc102e68ec50325f2024baa45ae621288e8965aef08d26",
+    "542.js": "a5072e01c2e7647bf9e26c0bbccb43023823625425eeeddc09b41ceaf236eb19",
+    "CHANGELOG.md": "83a65cceca72a06e679132a1162ad9a047225698a066fd0ef3ef38766fc9da93",
+    "plugin.json": "498378e201ada207860154496a3cd6098b9713f135f697bed8a02028c18c5482",
+    "528.js": "22a18778ba24e7f4ebdd925889a15131784ed482e66f27f8cc911646c29da3a1",
+    "156.js": "260b2cb8a816aec252f9e709744f4e1e4ea404433cf7adfc20ead96883f07d6b",
+    "149.js": "fb3e267e56052d39616b566d65378eb8ba4637d8e57865ea5231c9b1db82ac34",
+    "530.js": "acd0608a00b6b5846a2ade446de399a1f6e48850bcdba4dbeb13e129500acc8a",
+    "553.js": "b8dbc228f04d0296c6c177e57339ffefcc410f21b4f9868515793855d61ce73f",
+    "13.js": "0355ce7b0e9fadeb895a0f5a4a83727b1883af3884d911ee253a379be3442e01",
+    "module.js.map": "135320f3a1ed1bc9cdc402c07a2603d7756d20247038f812668c5aa70b5fa270",
+    "locales/ru-RU/grafana-clock-panel.json": "013895fb319d481ddbdb51f4cc8477e1ec8b77c48d103e431d8f0daa391c699a",
+    "locales/tr-TR/grafana-clock-panel.json": "a4498ec9cac9f77841ad17ea2f8b78c6e73b8a01238d002fef5ec7139cddcb38",
+    "locales/cs-CZ/grafana-clock-panel.json": "0f914606f6f44e8f3ec46e3ed7cec4ab7f41a6b294d15627300b0f885a9c120c",
+    "locales/zh-Hans/grafana-clock-panel.json": "1481738de44dcf55a080e49193f64f7948e9a0b6202d5f0d72ea7d33be8687f0",
+    "locales/sv-SE/grafana-clock-panel.json": "5b6cb821c312ab4051b68b70ebf25599f5de390c4c1929a137e293b107decc01",
+    "locales/pt-PT/grafana-clock-panel.json": "1d5e08de79d4ec3226d04b300558e29f9636b55e2505a6ff0140a862f89d3e9d",
+    "locales/de-DE/grafana-clock-panel.json": "ffa71679c27b69dff7d44c511e4fff92a7af86abafec8cf04a43fa838ffc3117",
+    "locales/pt-BR/grafana-clock-panel.json": "0e7b305ea78c9d41552be68bfe0d3926f8fd99ad27535c25774ff2aea87612ce",
+    "locales/it-IT/grafana-clock-panel.json": "3276a8d0115b70eea9b8d7480e1da3449e9a22524e44e5234cb8870be883abea",
+    "locales/fr-FR/grafana-clock-panel.json": "093292ef53ef32b289004b0610bd7cd1cbfd22967150a180b110831bd034f05c",
+    "locales/es-ES/grafana-clock-panel.json": "37d15579fa32d366fe81dc7a63552bc6776a2b02c5915871b9d9b668bbcb301e",
+    "locales/ko-KR/grafana-clock-panel.json": "ccc45392d71d0ddc0a7add9d7fe35c11c66991db4c9c90a4355ce1a39f437aba",
+    "locales/nl-NL/grafana-clock-panel.json": "dc11748dfd3ba5d8c0a44213f0a55ccc1078176569aa5999a14123b10a7750f0",
+    "locales/id-ID/grafana-clock-panel.json": "dff89c617ab8d406729f20f428cf857577829f5dde9581b85f10902d556d6cfb",
+    "locales/zh-Hant/grafana-clock-panel.json": "211fb9b550a2b064298a04d1a221ad766ffa51d804d613278347c0b8616d8d93",
+    "locales/en-US/grafana-clock-panel.json": "4df281418fa1bbdbe87dc28e2e246cb3e287f71503df33586fb60c78060c2933",
+    "locales/hu-HU/grafana-clock-panel.json": "846ea07a1b2b27de21acf42108dcc26d4e8b9ba04d28f03a169ecf07ada446e4",
+    "locales/pl-PL/grafana-clock-panel.json": "ce6386ff23d2ae47c9a920d2a9df471b24494f6719f8055ebaf58276c9e9292f",
+    "locales/ja-JP/grafana-clock-panel.json": "76bd12b2a0ebacaefbc359e98e3e64f561be3384757ff4d34d060936e3824563",
+    "790.js": "f782495b4136bad210fb124003d279238aa30d1d5f0b6131a31c4036f3711f92",
+    "module.js.LICENSE.txt": "b64d4bc9941c33358f6d8c927aeb0205ab858e5a4bf589bad084a9332ec43cad",
+    "85.js": "4a2a280e4cc30dae814f4ff4286cbbfd371d8120de8dc42a5a4a00323bc813c2",
+    "README.md": "4d6fec216e1e15ad68035a502c2e7b66c7af1a699b1a0062743e0cf8c5b6a9d3",
+    "22.js": "ab05fddae10840db825ed3743672201da7096fe230125df233be2f97c093d851",
+    "964.js": "849d92b076f023839eb2c8af20440410cb2153a5faabbbdceb884b5e248cf2e2",
+    "238.js": "d5461d412a2e680b0669da2649948e900ce9c728f6f0c8144638a9a0f20a27d9",
+    "595.js": "3f8337ac3f4bb686e040f49fdf3b0a18252916720a54bd4e2b0850ee6128088c",
+    "484.js": "53158788079b67c2b455b141412b025977099e76b4ace891195de588c8cc0a4a",
+    "804.js": "0c9ecc8ff6d458f28773bbcfffe56f0a369c2f22b7cf6ffc9a1a95f08df5b43a",
+    "732.js": "3bfd6b3f13f22bfc4ee3b6c8b6808bb094e8bb70fdefd83d14c9fdbd8ae23a06",
+    "107.js": "32256efad716e15c432039cbbec10f1fb933cb3b131f877e053be0dadb4d4dee",
+    "492.js": "6f12ff0edf3c1b0952328ca8daf27bf4e31b6cddd31168fb9176be25cf79bc3a",
+    "img/screenshot-clock-options.png": "55f428cc45f65e53a118db2b969353cd01e0d2f879848b1df503750ed27007cf",
+    "img/countdown1.png": "ce51c235273667dde4a8fedc36ea70c6bfa7670b247514a2ae1654bd872548aa",
+    "img/clock.svg": "d27cbdb85432fe1ad96eeec6758c2c4a0b189b306ba2040519aec09938889fbc",
+    "img/screenshot-showcase.png": "43c6520f1efa3343d839b9462a22ce962d2b041f2d5d9c743a8603caa8392a71",
+    "img/screenshot-clocks.png": "4dcf3c3d303e63239689df853b80ef79557eaf5496679400f362e68f57f60577"
+  }
+}
+-----BEGIN PGP SIGNATURE-----
+
+wsA+BAETCgBtBYJpZM44CRB+TQxqcIhm50UUAAAAAAAcACBzYWx0QG5vdGF0
+aW9ucy5vcGVucGdwanMub3JnatJjTKtR4HKwwoNplfGizI2a0+H2e8Ak9O3E
+pjBX0vkWIQTzOyW2kQdOhGNlcPN+TQxqcIhm5wAAm10CCQEr3r/Wp23qE8Je
+pRKNvcmifsw+huJ1tpXjQFVy6ITs0KvDSDxWPBGXX6BsGqzINmBZwiHdEnsI
+tIr/DZjsPGlsSwIGMixNkDjgBFgcmB5EVL9RUdtLgpziCzVcVZpjaNhCzISi
+CY6oVjK5sPzy/dM0ziHNtkc5FCHhprHTsbj0G6uXEEk=
+=DHWR
+-----END PGP SIGNATURE-----

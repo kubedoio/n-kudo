@@ -1,12 +1,55 @@
 # n-kudo (MVP-1)
 
-This repository contains the MVP-1 implementation for:
-- a SaaS control-plane (`cmd/control-plane`)
-- a single-host Linux edge agent (`cmd/edge`)
-- microVM lifecycle execution via Cloud Hypervisor
-- site onboarding via one-time enrollment token + mTLS identity
+[![Go Version](https://img.shields.io/badge/go-1.23-blue)](https://golang.org)
+[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-This file is intentionally written as a handoff document for both engineers and other LLM agents.
+A SaaS control plane for managing edge computing resources with secure agent enrollment, microVM lifecycle management, and mTLS-secured communication.
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              SaaS Control Plane                              │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐     │
+│  │   API GW     │  │   Auth       │  │  Enrollment  │  │   Agent      │     │
+│  │   (HTTPS)    │──│   Service    │──│   Service    │──│   Ingest     │     │
+│  └──────────────┘  └──────────────┘  └──────────────┘  └──────────────┘     │
+│         │                 │                  │                  │           │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐     │
+│  │ Plan Service │  │ NetBird      │  │   Audit      │  │  PostgreSQL  │     │
+│  │              │  │   Adapter    │  │   Service    │  │   (State)    │     │
+│  └──────────────┘  └──────────────┘  └──────────────┘  └──────────────┘     │
+│                                                                           │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                        mTLS + HTTP/2 (Agent Channel)
+                                    │
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           Edge Data-Plane (Per Site)                         │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                        nkudo-edge Agent                            │   │
+│  │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────────────┐   │   │
+│  │  │  Enroll  │  │  mTLS    │  │  Host    │  │    Cloud         │   │   │
+│  │  │  Client  │──│  Client  │──│  Facts   │──│  Hypervisor      │   │   │
+│  │  └──────────┘  └──────────┘  └──────────┘  │  Provider        │   │   │
+│  │                                             │  (MicroVMs)      │   │   │
+│  │  ┌──────────┐  ┌──────────┐  ┌──────────┐  └──────────────────┘   │   │
+│  │  │  Plan    │  │  State   │  │ NetBird  │                        │   │
+│  │  │ Executor │  │  Store   │  │  Module  │                        │   │
+│  │  └──────────┘  └──────────┘  └──────────┘                        │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Key Components
+
+| Component | Description |
+|-----------|-------------|
+| **Control Plane** | Centralized management API with tenant isolation, enrollment, and plan orchestration |
+| **Edge Agent** | Single binary deployed on edge hosts for local execution and state management |
+| **mTLS** | Mutual TLS for all agent-to-control-plane communication with short-lived certificates |
+| **Cloud Hypervisor** | Lightweight VMM for microVM lifecycle (create/start/stop/delete) |
+| **NetBird** | Optional VPN integration for secure mesh networking between sites |
 
 ## Snapshot (Current State)
 
@@ -276,47 +319,182 @@ Requires:
 
 - Postgres extension `pgcrypto`
 
-## Quickstart (Local MVP-1)
+## Quick Start
 
-### 1) Start control-plane + Postgres via Docker Compose
+### Prerequisites
+
+- Docker 24.0+ and Docker Compose 2.20+
+- 4GB RAM, 2 CPU cores
+- 20GB free disk space
+- Linux host for edge agent (Ubuntu 22.04+ recommended)
+
+### 1. Start Control Plane
 
 ```bash
+# Clone repository
+git clone https://github.com/kubedoio/n-kudo.git
+cd n-kudo
+
+# Production deployment
+cp .env.production.example .env.production
+# Edit .env.production with your settings
+nano .env.production
+
+# Start services
+docker compose --env-file .env.production up -d
+
+# Or use development setup
 ./scripts/dev-up.sh
 ```
 
-or:
+### 2. Build Edge Agent
 
 ```bash
-docker compose -f deployments/docker-compose.yml up --build
-```
-
-### 2) Build binaries
-
-```bash
-make build-cp
+# Build binary
 make build-edge
+
+# Or run directly
+go build -o bin/edge ./cmd/edge
 ```
 
-### 3) Run automated demo flow
+### 3. Enroll Edge Agent
 
 ```bash
+# Generate enrollment token (via API)
+export ADMIN_KEY="your-admin-key"
+export CONTROL_PLANE="https://localhost:8443"
+
+TOKEN=$(curl -s -X POST "${CONTROL_PLANE}/tenants/${TENANT_ID}/enrollment-tokens" \
+  -H "X-Admin-Key: ${ADMIN_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{"ttl_minutes": 30}' | jq -r '.token')
+
+# Enroll agent
+sudo ./bin/edge enroll \
+  --control-plane ${CONTROL_PLANE} \
+  --token ${TOKEN}
+
+# Start agent
+sudo ./bin/edge run --control-plane ${CONTROL_PLANE}
+```
+
+### 4. Run Demo
+
+```bash
+# Automated demo flow
 sudo -E ./demo.sh
 ```
 
-The demo script performs tenant/site/token bootstrap, enrollment, heartbeats, plan submit, local execution, log ingestion, and cleanup checks.
+See [Docker Compose Deployment Guide](docs/deployment/docker-compose.md) for production deployment details.
+See [Kubernetes Deployment Guide](docs/deployment/kubernetes.md) for K8s deployment.
 
-## Known Caveats (Current)
+## MVP-1 Feature Checklist
 
-- Heartbeat/log ingestion endpoints intentionally allow unknown JSON fields for forward-compatibility; admin/tenant endpoints remain strict.
-- Default TLS material is ephemeral unless persistent cert files are provided or `REQUIRE_PERSISTENT_PKI=true` is set.
+### Core Platform ✅
 
-## Additional Docs
+| Feature | Status | Description |
+|---------|--------|-------------|
+| Tenant Management | ✅ | Multi-tenant architecture with API key authentication |
+| Site Management | ✅ | Site registration and metadata tracking |
+| Agent Enrollment | ✅ | One-time enrollment tokens with mTLS identity issuance |
+| Certificate Lifecycle | ✅ | Short-lived agent certificates (24h TTL) with refresh |
+| Heartbeat System | ✅ | 15s heartbeats with offline detection |
+| Plan Execution | ✅ | Immutable plans with idempotent action execution |
+| Execution Logging | ✅ | Real-time log streaming from agents |
 
-- Canonical structure: `docs/repo-structure.md`
-- MVP-1 index: `docs/mvp1/README.md`
-- Architecture: `docs/mvp1/architecture.md`
-- NetBird strategy: `docs/mvp1/netbird-mvp1.md`
-- Cloud Hypervisor provider details: `docs/mvp1/cloudhypervisor-provider.md`
-- Acceptance/test plan: `docs/mvp1/acceptance-and-test-plan.md`
-- Deployment runbook: `docs/deployment-test.md`
-- Demo troubleshooting: `docs/mvp1/demo-troubleshooting.md`
+### Edge Computing ✅
+
+| Feature | Status | Description |
+|---------|--------|-------------|
+| Cloud Hypervisor | ✅ | MicroVM create/start/stop/delete lifecycle |
+| Host Facts | ✅ | CPU, memory, storage, kernel telemetry |
+| Local State | ✅ | JSON-based state store with idempotency cache |
+| NetBird Integration | ✅ | VPN readiness checks and auto-join |
+
+### Security ✅
+
+| Feature | Status | Description |
+|---------|--------|-------------|
+| mTLS | ✅ | Mutual TLS for all agent communication |
+| PKI | ✅ | Built-in CA with certificate rotation |
+| API Authentication | ✅ | Admin keys + tenant-scoped API keys |
+| Audit Logging | ✅ | Immutable audit event trail |
+| Rate Limiting | ✅ | Per-endpoint rate limiting |
+
+### Operations ✅
+
+| Feature | Status | Description |
+|---------|--------|-------------|
+| Health Checks | ✅ | HTTP health endpoints for all services |
+| Database Migrations | ✅ | Automatic schema migrations on startup |
+| Metrics | ✅ | Prometheus-compatible metrics endpoint |
+| Log Rotation | ✅ | Configurable log rotation policies |
+
+## Security Considerations
+
+### Authentication & Authorization
+
+- **Admin API Key**: Bootstrap authentication via `X-Admin-Key` header
+- **Tenant API Keys**: Scoped authentication for tenant operations
+- **Agent mTLS**: Certificate-based authentication for all agent endpoints
+- **Token Security**: One-time enrollment tokens with short TTL (15m default)
+
+### Encryption
+
+- **In Transit**: TLS 1.3 for all API communication
+- **Agent Channel**: mTLS with 24-hour certificate rotation
+- **At Rest**: Database encryption via PostgreSQL (configure as needed)
+
+### Network Security
+
+- **Default Deny**: Internal networks between services
+- **Port Exposure**: Minimal external port exposure (443/8443)
+- **Firewall**: Recommend restricting agent ingress to known IPs
+
+### Production Hardening
+
+```bash
+# Required for production
+REQUIRE_PERSISTENT_PKI=true
+CA_CERT_FILE=/secure/path/to/ca.crt
+CA_KEY_FILE=/secure/path/to/ca.key
+SERVER_CERT_FILE=/secure/path/to/server.crt
+SERVER_KEY_FILE=/secure/path/to/server.key
+
+# Enable audit logging
+AUDIT_LOGGING_ENABLED=true
+
+# Set strong secrets (min 32 characters)
+ADMIN_KEY=$(openssl rand -base64 32)
+POSTGRES_PASSWORD=$(openssl rand -base64 32)
+```
+
+### Known Limitations
+
+- Default TLS material is ephemeral for development convenience
+- Heartbeat/log ingestion endpoints allow unknown JSON fields for forward-compatibility
+- Always use persistent PKI (`REQUIRE_PERSISTENT_PKI=true`) in production
+
+## Documentation
+
+### Architecture & Design
+- [Repository Structure](docs/repo-structure.md) - Canonical layout and boundaries
+- [MVP-1 Index](docs/mvp1/README.md) - MVP-1 deliverables index
+- [Architecture Details](docs/mvp1/architecture.md) - Target architecture and data flows
+- [NetBird Strategy](docs/mvp1/netbird-mvp1.md) - VPN integration approach
+- [Cloud Hypervisor Provider](docs/mvp1/cloudhypervisor-provider.md) - VM provider implementation
+
+### Deployment
+- [Docker Compose Guide](docs/deployment/docker-compose.md) - Production Docker Compose deployment
+- [Kubernetes Guide](docs/deployment/kubernetes.md) - K8s manifests and operations
+
+### Operations & Troubleshooting
+- [Agent Troubleshooting](docs/runbooks/agent-troubleshooting.md) - Enrollment, certs, heartbeat, VM issues
+- [Enrollment Failure](docs/runbooks/enrollment-failure.md) - Enrollment-specific runbook
+- [VM Lifecycle Issues](docs/runbooks/vm-lifecycle-issues.md) - Cloud Hypervisor troubleshooting
+- [NetBird Troubleshooting](docs/runbooks/netbird-troubleshooting.md) - VPN connectivity issues
+- [Demo Troubleshooting](docs/mvp1/demo-troubleshooting.md) - Local demo issues
+
+### Development
+- [Acceptance Test Plan](docs/mvp1/acceptance-and-test-plan.md) - Testing criteria
+- [AGENTS.md](AGENTS.md) - Coding standards and repository rules

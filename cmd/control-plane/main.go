@@ -76,6 +76,9 @@ func runServe(cfg controlplane.Config) error {
 	}
 	defer db.Close()
 
+	// Configure connection pool settings
+	store.ConfigureConnectionPool(db)
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -112,13 +115,33 @@ func runServe(cfg controlplane.Config) error {
 
 	select {
 	case <-ctx.Done():
+		log.Println("shutdown signal received, starting graceful shutdown...")
 	case err := <-errCh:
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			return err
 		}
 	}
 
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+	// Create shutdown context with 30 second timeout
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer shutdownCancel()
-	return server.Shutdown(shutdownCtx)
+
+	// Shutdown the HTTP server gracefully
+	log.Println("shutting down HTTP server...")
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		log.Printf("HTTP server shutdown error: %v", err)
+	} else {
+		log.Println("HTTP server shutdown complete")
+	}
+
+	// Close the database repository
+	log.Println("closing database connection...")
+	if err := repo.Close(); err != nil {
+		log.Printf("database close error: %v", err)
+	} else {
+		log.Println("database connection closed")
+	}
+
+	log.Println("graceful shutdown complete")
+	return nil
 }

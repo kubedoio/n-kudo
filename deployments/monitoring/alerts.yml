@@ -1,0 +1,348 @@
+# =============================================================================
+# n-kudo Prometheus Alerting Rules
+# =============================================================================
+# These rules define alerts for the n-kudo control plane and edge agents.
+# 
+# Alert Severities:
+#   - critical: Immediate action required (page on-call)
+#   - warning:  Attention needed but not urgent (notify team)
+#   - info:     Informational (log only)
+#
+# Usage:
+#   Configure Prometheus to load this file via rule_files directive.
+# =============================================================================
+
+groups:
+  # ===========================================================================
+  # API Health Alerts
+  # ===========================================================================
+  - name: api_health
+    interval: 15s
+    rules:
+      - alert: HighErrorRate
+        expr: |
+          (
+            sum(rate(nkudo_http_requests_total{status=~"5.."}[5m]))
+            /
+            sum(rate(nkudo_http_requests_total[5m]))
+          ) > 0.05
+        for: 2m
+        labels:
+          severity: critical
+          service: control-plane
+          component: api
+        annotations:
+          summary: "High error rate detected on {{ $labels.service }}"
+          description: "Error rate is {{ $value | humanizePercentage }} (> 5%) for {{ $labels.service }} over the last 5 minutes."
+          runbook_url: "https://docs.nkudo.io/runbooks/high-error-rate"
+          dashboard_url: "https://grafana.nkudo.io/d/api-health"
+
+      - alert: HighLatency
+        expr: |
+          histogram_quantile(0.95,
+            sum(rate(nkudo_http_request_duration_seconds_bucket[5m])) by (le, service)
+          ) > 0.5
+        for: 3m
+        labels:
+          severity: warning
+          service: control-plane
+          component: api
+        annotations:
+          summary: "High latency on {{ $labels.service }}"
+          description: "95th percentile latency is {{ $value }}s (> 500ms) for {{ $labels.service }}."
+          runbook_url: "https://docs.nkudo.io/runbooks/high-latency"
+
+      - alert: APIUnavailable
+        expr: up{job="nkudo-control-plane"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: control-plane
+          component: api
+        annotations:
+          summary: "Control Plane API is unavailable"
+          description: "Control plane API has been down for more than 1 minute."
+          runbook_url: "https://docs.nkudo.io/runbooks/api-unavailable"
+
+  # ===========================================================================
+  # Edge Agent Alerts
+  # ===========================================================================
+  - name: edge_agents
+    interval: 15s
+    rules:
+      - alert: AgentsOffline
+        expr: |
+          (
+            nkudo_agents_offline_total
+            /
+            nkudo_agents_total
+          ) > 0.1 or nkudo_agents_offline_total > 5
+        for: 2m
+        labels:
+          severity: warning
+          service: edge
+          component: agents
+        annotations:
+          summary: "Multiple edge agents are offline"
+          description: "{{ $value }} agents are offline (> 5 or > 10% of total)."
+          runbook_url: "https://docs.nkudo.io/runbooks/agents-offline"
+          dashboard_url: "https://grafana.nkudo.io/d/agent-overview"
+
+      - alert: AgentNotReporting
+        expr: |
+          time() - nkudo_agent_last_heartbeat_timestamp > 300
+        for: 2m
+        labels:
+          severity: warning
+          service: edge
+          component: agents
+        annotations:
+          summary: "Agent {{ $labels.agent_id }} not reporting heartbeats"
+          description: "Agent has not sent a heartbeat in over 5 minutes."
+          runbook_url: "https://docs.nkudo.io/runbooks/agent-not-reporting"
+
+      - alert: HeartbeatFailures
+        expr: |
+          sum(rate(nkudo_heartbeat_failures_total[5m])) > 0.1
+        for: 1m
+        labels:
+          severity: warning
+          service: edge
+          component: heartbeat
+        annotations:
+          summary: "High rate of heartbeat failures"
+          description: "Heartbeat failure rate is {{ $value }}/sec (> 0.1/sec)."
+          runbook_url: "https://docs.nkudo.io/runbooks/heartbeat-failures"
+
+  # ===========================================================================
+  # Certificate & PKI Alerts
+  # ===========================================================================
+  - name: certificates
+    interval: 1m
+    rules:
+      - alert: CertificateExpiringSoon
+        expr: |
+          nkudo_certificate_expiry_timestamp - time() < 7 * 24 * 3600
+        for: 0m
+        labels:
+          severity: warning
+          service: control-plane
+          component: pki
+        annotations:
+          summary: "Certificate expiring soon"
+          description: "Certificate {{ $labels.common_name }} expires in {{ $value | humanizeDuration }}."
+          runbook_url: "https://docs.nkudo.io/runbooks/certificate-expiring"
+
+      - alert: CertificateExpiringCritical
+        expr: |
+          nkudo_certificate_expiry_timestamp - time() < 24 * 3600
+        for: 0m
+        labels:
+          severity: critical
+          service: control-plane
+          component: pki
+        annotations:
+          summary: "Certificate expiring within 24 hours"
+          description: "Certificate {{ $labels.common_name }} expires in {{ $value | humanizeDuration }}. Immediate renewal required!"
+          runbook_url: "https://docs.nkudo.io/runbooks/certificate-expiring"
+
+      - alert: CertificateExpired
+        expr: |
+          nkudo_certificate_expiry_timestamp - time() < 0
+        for: 0m
+        labels:
+          severity: critical
+          service: control-plane
+          component: pki
+        annotations:
+          summary: "Certificate has expired"
+          description: "Certificate {{ $labels.common_name }} has expired!"
+          runbook_url: "https://docs.nkudo.io/runbooks/certificate-expired"
+
+      - alert: CRLUpdateFailed
+        expr: |
+          time() - nkudo_crl_last_update_timestamp > 3600
+        for: 5m
+        labels:
+          severity: warning
+          service: control-plane
+          component: pki
+        annotations:
+          summary: "CRL not updated recently"
+          description: "Certificate Revocation List hasn't been updated in over an hour."
+          runbook_url: "https://docs.nkudo.io/runbooks/crl-update-failed"
+
+  # ===========================================================================
+  # Database Alerts
+  # ===========================================================================
+  - name: database
+    interval: 15s
+    rules:
+      - alert: DatabaseConnectionErrors
+        expr: |
+          sum(rate(nkudo_db_connection_errors_total[5m])) > 0
+        for: 1m
+        labels:
+          severity: critical
+          service: control-plane
+          component: database
+        annotations:
+          summary: "Database connection errors detected"
+          description: "Database connection error rate is {{ $value }}/sec."
+          runbook_url: "https://docs.nkudo.io/runbooks/db-connection-errors"
+
+      - alert: DatabaseHighLatency
+        expr: |
+          histogram_quantile(0.95,
+            sum(rate(nkudo_db_query_duration_seconds_bucket[5m])) by (le)
+          ) > 0.5
+        for: 3m
+        labels:
+          severity: warning
+          service: control-plane
+          component: database
+        annotations:
+          summary: "High database query latency"
+          description: "95th percentile DB query latency is {{ $value }}s (> 500ms)."
+          runbook_url: "https://docs.nkudo.io/runbooks/db-high-latency"
+
+      - alert: DatabaseConnectionsNearLimit
+        expr: |
+          nkudo_db_open_connections / nkudo_db_max_connections > 0.8
+        for: 2m
+        labels:
+          severity: warning
+          service: control-plane
+          component: database
+        annotations:
+          summary: "Database connections near limit"
+          description: "{{ $value | humanizePercentage }} of database connections are in use (> 80%)."
+          runbook_url: "https://docs.nkudo.io/runbooks/db-connections"
+
+      - alert: DatabaseDeadlockDetected
+        expr: |
+          sum(increase(nkudo_db_deadlocks_total[5m])) > 0
+        for: 0m
+        labels:
+          severity: warning
+          service: control-plane
+          component: database
+        annotations:
+          summary: "Database deadlock detected"
+          description: "Deadlocks have been detected in the database."
+          runbook_url: "https://docs.nkudo.io/runbooks/db-deadlock"
+
+  # ===========================================================================
+  # SLO / SLA Alerts
+  # ===========================================================================
+  - name: slo_compliance
+    interval: 1m
+    rules:
+      - alert: SLOAtRisk
+        expr: |
+          nkudo_slo_status == 0
+        for: 2m
+        labels:
+          severity: warning
+          service: control-plane
+          component: slo
+        annotations:
+          summary: "SLO {{ $labels.slo_name }} is at risk"
+          description: "Error budget for {{ $labels.slo_name }} is at risk of being exhausted."
+          runbook_url: "https://docs.nkudo.io/runbooks/slo-at-risk"
+
+      - alert: SLOBreached
+        expr: |
+          nkudo_slo_status == -1
+        for: 0m
+        labels:
+          severity: critical
+          service: control-plane
+          component: slo
+        annotations:
+          summary: "SLO {{ $labels.slo_name }} has been breached"
+          description: "Error budget for {{ $labels.slo_name }} has been exhausted!"
+          runbook_url: "https://docs.nkudo.io/runbooks/slo-breached"
+
+      - alert: HighErrorBudgetBurn
+        expr: |
+          (
+            sum(rate(nkudo_error_budget_used[1h])) by (service, slo)
+            /
+            sum(nkudo_error_budget_total) by (service, slo)
+          ) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+          service: control-plane
+          component: slo
+        annotations:
+          summary: "High error budget burn rate"
+          description: "Error budget for {{ $labels.service }}/{{ $labels.slo }} is burning at {{ $value | humanizePercentage }}/hour."
+          runbook_url: "https://docs.nkudo.io/runbooks/error-budget-burn"
+
+  # ===========================================================================
+  # Resource Alerts
+  # ===========================================================================
+  - name: resources
+    interval: 1m
+    rules:
+      - alert: HighCPUUsage
+        expr: |
+          nkudo_host_cpu_usage_percent > 80
+        for: 5m
+        labels:
+          severity: warning
+          service: control-plane
+          component: resources
+        annotations:
+          summary: "High CPU usage on {{ $labels.instance }}"
+          description: "CPU usage is {{ $value }}% (> 80%) for over 5 minutes."
+
+      - alert: HighMemoryUsage
+        expr: |
+          (
+            nkudo_host_memory_usage_bytes
+            /
+            nkudo_host_memory_total_bytes
+          ) > 0.85
+        for: 5m
+        labels:
+          severity: warning
+          service: control-plane
+          component: resources
+        annotations:
+          summary: "High memory usage on {{ $labels.instance }}"
+          description: "Memory usage is {{ $value | humanizePercentage }} (> 85%)."
+
+      - alert: DiskSpaceLow
+        expr: |
+          (
+            nkudo_disk_usage_bytes
+            /
+            nkudo_disk_total_bytes
+          ) > 0.85
+        for: 5m
+        labels:
+          severity: warning
+          service: control-plane
+          component: resources
+        annotations:
+          summary: "Low disk space on {{ $labels.path }}"
+          description: "Disk usage is {{ $value | humanizePercentage }} (> 85%) on {{ $labels.path }}."
+
+      - alert: DiskSpaceCritical
+        expr: |
+          (
+            nkudo_disk_usage_bytes
+            /
+            nkudo_disk_total_bytes
+          ) > 0.95
+        for: 1m
+        labels:
+          severity: critical
+          service: control-plane
+          component: resources
+        annotations:
+          summary: "Critical disk space on {{ $labels.path }}"
+          description: "Disk usage is {{ $value | humanizePercentage }} (> 95%) on {{ $labels.path }}!"

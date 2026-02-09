@@ -1,0 +1,33 @@
+{
+  "testTenants": [
+    {
+      "slug": "test-tenant-alpha",
+      "name": "Test Tenant Alpha",
+      "primary_region": "us-east-1",
+      "data_retention_days": 30
+    },
+    {
+      "slug": "test-tenant-beta",
+      "name": "Test Tenant Beta",
+      "primary_region": "eu-west-1",
+      "data_retention_days": 7
+    },
+    {
+      "slug": "test-tenant-gamma",
+      "name": "Test Tenant Gamma",
+      "primary_region": "ap-southeast-1",
+      "data_retention_days": 90
+    }
+  ],
+  "newTenant": {
+    "slug": "new-e2e-tenant",
+    "name": "New E2E Test Tenant",
+    "primary_region": "us-west-2",
+    "data_retention_days": 30
+  },
+  "invalidTenant": {
+    "slug": "",
+    "name": "",
+    "primary_region": "invalid-region"
+  }
+}

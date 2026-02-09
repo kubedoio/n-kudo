@@ -11,12 +11,16 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
+	edgecmd "github.com/kubedoio/n-kudo/internal/edge/cmd"
 	"github.com/kubedoio/n-kudo/internal/edge/enroll"
 	"github.com/kubedoio/n-kudo/internal/edge/executor"
 	"github.com/kubedoio/n-kudo/internal/edge/hostfacts"
+	"github.com/kubedoio/n-kudo/internal/edge/logger"
+	"github.com/kubedoio/n-kudo/internal/edge/metrics"
 	"github.com/kubedoio/n-kudo/internal/edge/mtls"
 	"github.com/kubedoio/n-kudo/internal/edge/netbird"
 	"github.com/kubedoio/n-kudo/internal/edge/providers/cloudhypervisor"
@@ -55,8 +59,18 @@ func main() {
 		err = runApply(ctx, os.Args[2:])
 	case "verify-heartbeat":
 		err = runVerifyHeartbeat(ctx, os.Args[2:])
+	case "status":
+		err = runStatus(os.Args[2:])
+	case "check":
+		os.Exit(edgecmd.RunCheck(os.Args[2:]))
+	case "unenroll":
+		err = edgecmd.RunUnenroll(os.Args[2:])
+	case "renew":
+		err = edgecmd.RunRenew(os.Args[2:])
 	case "version":
 		fmt.Println(version)
+	case "--help", "-h", "help":
+		usage()
 	default:
 		usage()
 		err = fmt.Errorf("unknown command: %s", os.Args[1])
@@ -75,7 +89,13 @@ func usage() {
   hostfacts         Print host facts JSON
   apply             Execute a local plan JSON file
   verify-heartbeat  Send a single heartbeat
-  version           Print binary version`)
+  status            Show agent enrollment status and certificate info
+  check             Pre-flight check for requirements
+  unenroll          Cleanly remove agent from site
+  renew             Manual certificate renewal
+  version           Print binary version
+
+Use "edge <command> --help" for more information about a command.`)
 }
 
 func runEnroll(ctx context.Context, args []string) error {
@@ -187,6 +207,8 @@ func runApply(ctx context.Context, args []string) error {
 		stateDir   = fs.String("state-dir", defaultStateDir, "State directory")
 		runtimeDir = fs.String("runtime-dir", defaultRuntimeDir, "Runtime directory")
 		chBin      = fs.String("cloud-hypervisor-bin", "cloud-hypervisor", "Cloud Hypervisor binary path")
+		logFormat  = fs.String("log-format", "text", "Log format: json or text")
+		logLevel   = fs.String("log-level", "info", "Log level: debug, info, warn, error")
 	)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -194,6 +216,9 @@ func runApply(ctx context.Context, args []string) error {
 	if *planFile == "" {
 		return errors.New("--plan is required")
 	}
+
+	// Initialize structured logger
+	logger.Init(*logFormat, *logLevel)
 
 	st, err := state.Open(*stateDir)
 	if err != nil {
@@ -241,6 +266,9 @@ func runService(ctx context.Context, args []string) error {
 		netbirdProbeHTTPMin = fs.Int("netbird-probe-http-min", 200, "NetBird HTTP probe minimum status code")
 		netbirdProbeHTTPMax = fs.Int("netbird-probe-http-max", 399, "NetBird HTTP probe maximum status code")
 		chBin               = fs.String("cloud-hypervisor-bin", "cloud-hypervisor", "Cloud Hypervisor binary")
+		metricsAddr         = fs.String("metrics-addr", ":9090", "Metrics server address")
+		logFormat           = fs.String("log-format", "text", "Log format: json or text")
+		logLevel            = fs.String("log-level", "info", "Log level: debug, info, warn, error")
 	)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -248,6 +276,19 @@ func runService(ctx context.Context, args []string) error {
 	if strings.TrimSpace(*controlPlane) == "" {
 		return errors.New("--control-plane is required")
 	}
+
+	// Initialize structured logger
+	logger.Init(*logFormat, *logLevel)
+
+	// Start metrics server
+	go func() {
+		logger.WithFields(map[string]interface{}{
+			"address": *metricsAddr,
+		}).Info("Starting metrics server")
+		if err := metrics.StartServer(*metricsAddr); err != nil {
+			logger.Errorf("Metrics server error: %v", err)
+		}
+	}()
 
 	st, err := state.Open(*stateDir)
 	if err != nil {
@@ -273,6 +314,16 @@ func runService(ctx context.Context, args []string) error {
 	nb := netbird.Client{Binary: *netbirdBin}
 	sink := &streamSink{Identity: id, Client: cp}
 	exec := &executor.Executor{Store: st, Provider: provider, Logs: sink}
+
+	// Start certificate rotator
+	certRotator := mtls.NewCertRotator(pki, id, cp)
+	if err := certRotator.Start(ctx); err != nil {
+		logger.WithFields(map[string]interface{}{
+			"error": err.Error(),
+		}).Warn("Failed to start certificate rotator")
+	}
+	defer certRotator.Stop()
+
 	resolvedNBHostname := strings.TrimSpace(*netbirdHostname)
 	if resolvedNBHostname == "" {
 		resolvedNBHostname, _ = os.Hostname()
@@ -281,10 +332,21 @@ func runService(ctx context.Context, args []string) error {
 	netbirdInstallCommand := splitCommand(*netbirdInstall)
 
 	loop := func() error {
+		hbStart := time.Now()
+
 		facts, factsErr := hostfacts.Collect()
 		if factsErr != nil {
-			log.Printf("hostfacts warning: %v", factsErr)
+			logger.WithFields(map[string]interface{}{
+				"error": factsErr.Error(),
+			}).Warn("hostfacts collection warning")
+		} else {
+			// Update host metrics using available fields
+			memoryUsed := float64(facts.MemoryTotal - facts.MemoryFree)
+			metrics.HostMemoryUsageBytes.Set(memoryUsed)
+			// CPU percent not directly available, use CPU cores as a proxy
+			metrics.HostCPUUsagePercent.Set(float64(facts.CPUCores))
 		}
+
 		nbSnapshot, nbErr := nb.Evaluate(ctx, netbird.Config{
 			Enabled:        *netbirdEnabled,
 			AutoJoin:       *netbirdAutoJoin,
@@ -304,13 +366,18 @@ func runService(ctx context.Context, args []string) error {
 			netbirdSetupKeyValue = ""
 		}
 		if nbErr != nil {
-			log.Printf("netbird evaluate warning: %v", nbErr)
+			logger.WithFields(map[string]interface{}{
+				"error": nbErr.Error(),
+			}).Warn("netbird evaluation warning")
 		}
 		nbStatus := nbSnapshot.Peer
 		nbStatus.Connected = nbSnapshot.ControlPlaneConnected()
 		nbStatus.State = string(nbSnapshot.State)
 		nbStatus.Reason = nbSnapshot.Reason
+
+		// List VMs and update metrics
 		vms, _ := st.ListMicroVMs()
+		updateVMMetrics(vms)
 
 		hbResp, err := cp.Heartbeat(ctx, enroll.HeartbeatRequest{
 			TenantID:      id.TenantID,
@@ -322,9 +389,24 @@ func runService(ctx context.Context, args []string) error {
 			NetBirdStatus: nbStatus,
 			MicroVMs:      vms,
 		})
+
+		// Record heartbeat metrics
+		hbDuration := time.Since(hbStart)
+		metrics.HeartbeatDuration.Observe(hbDuration.Seconds())
+
 		if err != nil {
+			metrics.HeartbeatFailures.Inc()
+			logger.WithFields(map[string]interface{}{
+				"duration_ms": hbDuration.Milliseconds(),
+				"error":       err.Error(),
+			}).Error("Heartbeat failed")
 			return err
 		}
+
+		metrics.HeartbeatsSent.Inc()
+		logger.WithFields(map[string]interface{}{
+			"duration_ms": hbDuration.Milliseconds(),
+		}).Debug("Heartbeat sent successfully")
 
 		plans := hbResp.PendingPlans
 		if len(plans) == 0 {
@@ -337,14 +419,27 @@ func runService(ctx context.Context, args []string) error {
 			if strings.TrimSpace(plan.ExecutionID) == "" {
 				plan.ExecutionID = fmt.Sprintf("exec-%d", time.Now().UTC().UnixNano())
 			}
+			logger.WithFields(map[string]interface{}{
+				"execution_id": plan.ExecutionID,
+				"plan_id":      plan.PlanID,
+			}).Info("Plan execution started")
 			sink.Write(ctx, executor.LogEntry{ExecutionID: plan.ExecutionID, Level: "INFO", Message: "plan execution started"})
 			res, runErr := exec.ExecutePlan(ctx, plan)
 			if reportErr := cp.ReportPlanResult(ctx, res); reportErr != nil {
-				log.Printf("plan result report warning: %v", reportErr)
+				logger.WithFields(map[string]interface{}{
+					"error": reportErr.Error(),
+				}).Warn("plan result report warning")
 			}
 			if runErr != nil {
+				logger.WithFields(map[string]interface{}{
+					"execution_id": plan.ExecutionID,
+					"error":        runErr.Error(),
+				}).Error("Plan execution failed")
 				sink.Write(ctx, executor.LogEntry{ExecutionID: plan.ExecutionID, Level: "ERROR", Message: runErr.Error()})
 			} else {
+				logger.WithFields(map[string]interface{}{
+					"execution_id": plan.ExecutionID,
+				}).Info("Plan execution finished")
 				sink.Write(ctx, executor.LogEntry{ExecutionID: plan.ExecutionID, Level: "INFO", Message: "plan execution finished"})
 			}
 		}
@@ -364,6 +459,25 @@ func runService(ctx context.Context, args []string) error {
 		}
 		select {
 		case <-ctx.Done():
+			logger.Info("shutdown signal received, starting graceful shutdown...")
+
+			// Stop all running VMs gracefully
+			logger.Info("stopping all running VMs...")
+			if err := stopAllVMsGracefully(context.Background(), st, provider); err != nil {
+				logger.WithFields(map[string]interface{}{
+					"error": err.Error(),
+				}).Warn("error stopping VMs during shutdown")
+			}
+
+			// Send final heartbeat with shutdown status
+			logger.Info("sending final heartbeat...")
+			if err := sendFinalHeartbeat(context.Background(), cp, id, st, netbird.Status{Connected: false, State: "shutdown", Reason: "agent_shutdown"}); err != nil {
+				logger.WithFields(map[string]interface{}{
+					"error": err.Error(),
+				}).Warn("failed to send final heartbeat")
+			}
+
+			logger.Info("graceful shutdown complete")
 			return nil
 		case <-time.After(*interval):
 		}
@@ -373,6 +487,66 @@ func runService(ctx context.Context, args []string) error {
 func runVerifyHeartbeat(ctx context.Context, args []string) error {
 	newArgs := append([]string{"--once"}, args...)
 	return runService(ctx, newArgs)
+}
+
+func runStatus(args []string) error {
+	fs := flag.NewFlagSet("status", flag.ContinueOnError)
+	var (
+		pkiDir   = fs.String("pki-dir", defaultPKIDir, "PKI directory")
+		stateDir = fs.String("state-dir", defaultStateDir, "State directory")
+	)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	// Load identity
+	st, err := state.Open(*stateDir)
+	if err != nil {
+		return fmt.Errorf("open state: %w", err)
+	}
+	defer st.Close()
+
+	identity, err := st.LoadIdentity()
+	if err != nil {
+		return fmt.Errorf("load identity: %w (run enroll first)", err)
+	}
+
+	fmt.Printf("Agent ID:    %s\n", identity.AgentID)
+	fmt.Printf("Tenant ID:   %s\n", identity.TenantID)
+	fmt.Printf("Site ID:     %s\n", identity.SiteID)
+	fmt.Printf("Host ID:     %s\n", identity.HostID)
+	fmt.Printf("Saved At:    %s\n", identity.SavedAt.Format(time.RFC3339))
+
+	// Load certificate info
+	pki := mtls.DefaultPKIPaths(*pkiDir)
+	cert, err := mtls.LoadCertificate(pki.ClientCert)
+	if err != nil {
+		fmt.Printf("\nCertificate: not available (%v)\n", err)
+	} else {
+		now := time.Now().UTC()
+		remaining := cert.NotAfter.Sub(now)
+		totalLifetime := cert.NotAfter.Sub(cert.NotBefore)
+		percentRemaining := float64(remaining) / float64(totalLifetime) * 100
+
+		fmt.Printf("\nCertificate Information:\n")
+		fmt.Printf("  Subject:     %s\n", cert.Subject.CommonName)
+		fmt.Printf("  Issuer:      %s\n", cert.Issuer.CommonName)
+		fmt.Printf("  Serial:      %s\n", cert.SerialNumber.String())
+		fmt.Printf("  Not Before:  %s\n", cert.NotBefore.Format(time.RFC3339))
+		fmt.Printf("  Not After:   %s\n", cert.NotAfter.Format(time.RFC3339))
+		fmt.Printf("  Remaining:   %s (%.1f%%)\n", remaining.Round(time.Second), percentRemaining)
+
+		// Check if rotation is needed
+		if remaining <= 0 {
+			fmt.Printf("  Status:      EXPIRED\n")
+		} else if remaining < 6*time.Hour || percentRemaining < 20 {
+			fmt.Printf("  Status:      ROTATION RECOMMENDED\n")
+		} else {
+			fmt.Printf("  Status:      OK\n")
+		}
+	}
+
+	return nil
 }
 
 func readPlan(path string) (executor.Plan, error) {
@@ -457,4 +631,88 @@ func splitCommand(raw string) []string {
 		return nil
 	}
 	return strings.Fields(trimmed)
+}
+
+func stopAllVMsGracefully(ctx context.Context, st *state.Store, provider *cloudhypervisor.Provider) error {
+	vms, err := st.ListMicroVMs()
+	if err != nil {
+		return fmt.Errorf("list VMs: %w", err)
+	}
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, len(vms))
+
+	for _, vm := range vms {
+		if vm.Status != "running" {
+			continue
+		}
+		wg.Add(1)
+		go func(vmID string) {
+			defer wg.Done()
+			logger.WithFields(map[string]interface{}{
+				"vm_id": vmID,
+			}).Info("stopping VM gracefully")
+			if err := provider.StopVM(ctx, vmID); err != nil {
+				errCh <- fmt.Errorf("stop VM %s: %w", vmID, err)
+			}
+		}(vm.ID)
+	}
+
+	wg.Wait()
+	close(errCh)
+
+	var errs []error
+	for err := range errCh {
+		errs = append(errs, err)
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("errors stopping VMs: %v", errs)
+	}
+	return nil
+}
+
+func sendFinalHeartbeat(ctx context.Context, cp *enroll.Client, id state.Identity, st *state.Store, lastNBStatus netbird.Status) error {
+	vms, _ := st.ListMicroVMs()
+
+	hbReq := enroll.HeartbeatRequest{
+		TenantID:  id.TenantID,
+		SiteID:    id.SiteID,
+		HostID:    id.HostID,
+		AgentID:   id.AgentID,
+		SentAt:    time.Now().UTC(),
+		HostFacts: hostfacts.Facts{OSType: runtimeOS(), Arch: runtimeArch()},
+		NetBirdStatus: netbird.Status{
+			Connected: lastNBStatus.Connected,
+			State:     string(lastNBStatus.State),
+			Reason:    "agent_shutdown",
+		},
+		MicroVMs: vms,
+		Shutdown: true,
+	}
+
+	_, err := cp.Heartbeat(ctx, hbReq)
+	return err
+}
+
+func updateVMMetrics(vms []state.MicroVM) {
+	runningCount := 0
+	stoppedCount := 0
+
+	for _, vm := range vms {
+		switch vm.Status {
+		case "running":
+			runningCount++
+		case "stopped":
+			stoppedCount++
+		}
+
+		// Update per-VM metrics with available fields
+		// Note: MicroVM struct doesn't have Cores/Memory fields in current implementation
+		// We register the VM presence for tracking with ID (not VMID)
+		metrics.VMCPUCores.WithLabelValues(vm.ID, vm.Name).Set(0)
+		metrics.VMMemoryBytes.WithLabelValues(vm.ID, vm.Name).Set(0)
+	}
+
+	metrics.VMsTotal.WithLabelValues("running").Set(float64(runningCount))
+	metrics.VMsTotal.WithLabelValues("stopped").Set(float64(stoppedCount))
 }

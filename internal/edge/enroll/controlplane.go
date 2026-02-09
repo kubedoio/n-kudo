@@ -25,6 +25,7 @@ type HeartbeatRequest struct {
 	HostFacts     hostfacts.Facts `json:"host_facts"`
 	NetBirdStatus netbird.Status  `json:"netbird_status"`
 	MicroVMs      []state.MicroVM `json:"microvms"`
+	Shutdown      bool            `json:"shutdown,omitempty"`
 }
 
 type HeartbeatResponse struct {

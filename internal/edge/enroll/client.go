@@ -117,3 +117,47 @@ func firstMAC() string {
 func NewNonce() string {
 	return fmt.Sprintf("%d", time.Now().UTC().UnixNano())
 }
+
+// UnenrollRequest represents a request to unenroll an agent
+type UnenrollRequest struct {
+	AgentID string `json:"agent_id"`
+	Reason  string `json:"reason,omitempty"`
+}
+
+// Unenroll sends an unenrollment request to the control plane
+func (c *Client) Unenroll(ctx context.Context, agentID string) error {
+	req := UnenrollRequest{
+		AgentID: agentID,
+		Reason:  "user-initiated",
+	}
+	return c.postJSON(ctx, "/v1/unenroll", req, nil)
+}
+
+// RenewRequest represents a certificate renewal request
+type RenewRequest struct {
+	AgentID       string `json:"agent_id"`
+	CSRPEM        string `json:"csr_pem"`
+	RefreshToken  string `json:"refresh_token"`
+}
+
+// RenewResponse represents the response from a certificate renewal request
+type RenewResponse struct {
+	ClientCertificatePEM string `json:"client_certificate_pem"`
+	CACertificatePEM     string `json:"ca_certificate_pem"`
+	ExpiresAt            string `json:"expires_at"`
+	RefreshToken         string `json:"refresh_token,omitempty"`
+}
+
+// RenewCertificate requests a new certificate from the control plane
+func (c *Client) RenewCertificate(ctx context.Context, agentID, csrPEM, refreshToken string) (*RenewResponse, error) {
+	req := RenewRequest{
+		AgentID:      agentID,
+		CSRPEM:       csrPEM,
+		RefreshToken: refreshToken,
+	}
+	var resp RenewResponse
+	if err := c.postJSON(ctx, "/v1/renew", req, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}

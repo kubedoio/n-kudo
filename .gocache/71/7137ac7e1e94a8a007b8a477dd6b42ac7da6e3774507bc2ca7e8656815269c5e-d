@@ -1,4 +1,0 @@
-./client.go
-./controlplane.go
-./token.go
-./token_test.go

@@ -1,0 +1,45 @@
+{
+  "testVMs": [
+    {
+      "name": "test-vm-small",
+      "vcpu_count": 1,
+      "memory_mib": 256,
+      "state": "STOPPED"
+    },
+    {
+      "name": "test-vm-medium",
+      "vcpu_count": 2,
+      "memory_mib": 512,
+      "state": "RUNNING"
+    },
+    {
+      "name": "test-vm-large",
+      "vcpu_count": 4,
+      "memory_mib": 1024,
+      "state": "STOPPED"
+    }
+  ],
+  "newVM": {
+    "name": "e2e-test-vm",
+    "vcpu_count": 2,
+    "memory_mib": 512,
+    "operation": "CREATE"
+  },
+  "planActions": {
+    "create": {
+      "operation": "CREATE",
+      "name": "e2e-test-vm",
+      "vcpu_count": 2,
+      "memory_mib": 512
+    },
+    "start": {
+      "operation": "START"
+    },
+    "stop": {
+      "operation": "STOP"
+    },
+    "delete": {
+      "operation": "DELETE"
+    }
+  }
+}

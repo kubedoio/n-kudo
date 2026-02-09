@@ -1,0 +1,34 @@
+{
+  "testSites": [
+    {
+      "name": "Main Data Center",
+      "external_key": "site-main-dc",
+      "location_country_code": "US"
+    },
+    {
+      "name": "Edge Location West",
+      "external_key": "site-edge-west",
+      "location_country_code": "US"
+    },
+    {
+      "name": "Edge Location EU",
+      "external_key": "site-edge-eu",
+      "location_country_code": "DE"
+    },
+    {
+      "name": "Backup Site",
+      "external_key": "site-backup",
+      "location_country_code": "SG"
+    }
+  ],
+  "newSite": {
+    "name": "New E2E Test Site",
+    "external_key": "site-e2e-test",
+    "location_country_code": "US"
+  },
+  "invalidSite": {
+    "name": "",
+    "external_key": "",
+    "location_country_code": "INVALID"
+  }
+}

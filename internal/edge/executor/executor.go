@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kubedoio/n-kudo/internal/edge/logger"
+	"github.com/kubedoio/n-kudo/internal/edge/metrics"
 	"github.com/kubedoio/n-kudo/internal/edge/state"
 )
 
@@ -34,7 +36,16 @@ func (e *Executor) ExecutePlan(ctx context.Context, plan Plan) (PlanResult, erro
 }
 
 func (e *Executor) executeAction(parent context.Context, executionID string, action Action) ActionResult {
+	start := time.Now()
 	startedAt := time.Now().UTC()
+
+	// Log start
+	logger.WithComponent("executor").WithFields(map[string]interface{}{
+		"action_id":    action.ActionID,
+		"action_type":  action.Type,
+		"execution_id": executionID,
+	}).Info("Starting action execution")
+
 	log := func(level, msg string) {
 		if e.Logs != nil {
 			e.Logs.Write(parent, LogEntry{ExecutionID: executionID, ActionID: action.ActionID, Level: level, Message: msg})
@@ -43,6 +54,10 @@ func (e *Executor) executeAction(parent context.Context, executionID string, act
 
 	if cached, found, err := e.Store.GetActionRecord(action.ActionID); err == nil && found {
 		log("INFO", "action reused from idempotency cache")
+		logger.WithComponent("executor").WithFields(map[string]interface{}{
+			"action_id":   action.ActionID,
+			"action_type": action.Type,
+		}).Info("action reused from idempotency cache")
 		return ActionResult{
 			ExecutionID: executionID,
 			ActionID:    action.ActionID,
@@ -69,6 +84,7 @@ func (e *Executor) executeAction(parent context.Context, executionID string, act
 	}
 
 	var err error
+	var cmdResult *CommandResult
 	switch action.Type {
 	case ActionMicroVMCreate:
 		var params MicroVMParams
@@ -94,21 +110,57 @@ func (e *Executor) executeAction(parent context.Context, executionID string, act
 		if err == nil {
 			err = e.Provider.Delete(ctx, params.VMID)
 		}
+	case ActionMicroVMPause:
+		err = e.executePause(ctx, action)
+	case ActionMicroVMResume:
+		err = e.executeResume(ctx, action)
+	case ActionMicroVMSnapshot:
+		err = e.executeSnapshot(ctx, action)
+	case ActionCommandExecute:
+		cmdResult, err = e.executeCommand(ctx, action)
 	default:
 		err = fmt.Errorf("unknown action type: %s", action.Type)
 	}
 
 	res.FinishedAt = time.Now().UTC()
+	duration := time.Since(start)
+
+	// Record metrics
+	status := "success"
 	if err != nil {
 		res.OK = false
 		res.ErrorCode = "ACTION_FAILED"
 		res.Message = err.Error()
+		status = "failure"
 		log("ERROR", "action failed: "+err.Error())
 	} else {
 		res.OK = true
-		res.Message = "ok"
+		if cmdResult != nil {
+			res.Message = fmt.Sprintf("Command exited with code %d", cmdResult.ExitCode)
+			if cmdResult.Stdout != "" {
+				log("INFO", "stdout: "+cmdResult.Stdout)
+			}
+			if cmdResult.Stderr != "" {
+				log("WARN", "stderr: "+cmdResult.Stderr)
+			}
+		} else {
+			res.Message = "ok"
+		}
 		log("INFO", "action completed")
 	}
+
+	// Update Prometheus metrics
+	metrics.ActionDuration.WithLabelValues(string(action.Type)).Observe(duration.Seconds())
+	metrics.ActionsExecuted.WithLabelValues(string(action.Type), status).Inc()
+
+	// Log completion
+	logger.WithComponent("executor").WithFields(map[string]interface{}{
+		"action_id":    action.ActionID,
+		"action_type":  action.Type,
+		"execution_id": executionID,
+		"duration_ms":  duration.Milliseconds(),
+		"status":       status,
+	}).Info("Action execution completed")
 
 	record := state.ActionRecord{
 		ActionID:    action.ActionID,
@@ -119,6 +171,10 @@ func (e *Executor) executeAction(parent context.Context, executionID string, act
 	}
 	if putErr := e.Store.PutActionRecord(record); putErr != nil {
 		log("WARN", "failed to store action result: "+putErr.Error())
+		logger.WithComponent("executor").WithFields(map[string]interface{}{
+			"action_id": action.ActionID,
+			"error":     putErr.Error(),
+		}).Warn("failed to store action result")
 	}
 	return res
 }

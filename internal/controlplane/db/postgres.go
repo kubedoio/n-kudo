@@ -7,16 +7,103 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"os"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/lib/pq"
+)
+
+// Query timeout durations
+const (
+	DefaultQueryTimeout = 30 * time.Second
+	LongQueryTimeout    = 60 * time.Second
+)
+
+// Connection pool defaults
+const (
+	DefaultMaxConns        = 25
+	DefaultMinConns        = 5
+	DefaultMaxConnLifetime = 30 * time.Minute
+	DefaultMaxConnIdleTime = 10 * time.Minute
+	DefaultHealthCheckPeriod = 5 * time.Minute
 )
 
 type PostgresRepo struct {
 	db *sql.DB
 }
 
+// NewPostgresRepo creates a new PostgresRepo with the given database connection.
 func NewPostgresRepo(db *sql.DB) *PostgresRepo {
 	return &PostgresRepo{db: db}
+}
+
+// Close closes the database connection pool.
+func (r *PostgresRepo) Close() error {
+	if r.db != nil {
+		return r.db.Close()
+	}
+	return nil
+}
+
+// DB returns the underlying sql.DB instance for health checks.
+func (r *PostgresRepo) DB() *sql.DB {
+	return r.db
+}
+
+// ConfigureConnectionPool configures the connection pool settings from environment variables.
+// This should be called after sql.Open but before using the database.
+func ConfigureConnectionPool(db *sql.DB) {
+	// Max open connections
+	maxConns := getEnvInt("DB_MAX_CONNECTIONS", DefaultMaxConns)
+	db.SetMaxOpenConns(maxConns)
+
+	// Max idle connections (min connections in pool)
+	minConns := getEnvInt("DB_MIN_CONNECTIONS", DefaultMinConns)
+	db.SetMaxIdleConns(minConns)
+
+	// Connection max lifetime
+	maxLifetime := getEnvDuration("DB_CONN_MAX_LIFETIME", DefaultMaxConnLifetime)
+	db.SetConnMaxLifetime(maxLifetime)
+
+	// Connection max idle time
+	maxIdleTime := getEnvDuration("DB_CONN_MAX_IDLE_TIME", DefaultMaxConnIdleTime)
+	db.SetConnMaxIdleTime(maxIdleTime)
+
+	// Note: HealthCheckPeriod is not directly supported by database/sql
+	// It's typically handled by the connection pool implementation or driver
+	// For pgx, this would be available, but for lib/pq we rely on connection cycling
+}
+
+// getEnvInt gets an integer value from environment variable with a default.
+func getEnvInt(key string, defaultVal int) int {
+	if val := os.Getenv(key); val != "" {
+		if n, err := strconv.Atoi(val); err == nil && n > 0 {
+			return n
+		}
+	}
+	return defaultVal
+}
+
+// getEnvDuration gets a duration value from environment variable with a default.
+func getEnvDuration(key string, defaultVal time.Duration) time.Duration {
+	if val := os.Getenv(key); val != "" {
+		if d, err := time.ParseDuration(val); err == nil && d > 0 {
+			return d
+		}
+	}
+	return defaultVal
+}
+
+// queryTimeout returns a context with timeout for queries.
+func queryTimeout(parent context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if timeout <= 0 {
+		timeout = DefaultQueryTimeout
+	}
+	return context.WithTimeout(parent, timeout)
 }
 
 func (r *PostgresRepo) CreateTenant(ctx context.Context, t Tenant) (Tenant, error) {
@@ -882,6 +969,118 @@ func (r *PostgresRepo) ExecutionBelongsToTenant(ctx context.Context, executionID
 	return ok, err
 }
 
+func (r *PostgresRepo) ListExecutions(ctx context.Context, tenantID, siteID string, statuses []string, limit int) ([]ExecutionWithTimestamps, error) {
+	if limit <= 0 || limit > 1000 {
+		limit = 50
+	}
+	query := `
+SELECT 
+    e.id, e.plan_id, e.operation_id, e.operation_type,
+    e.state::text, COALESCE(e.vm_id::text,''), e.error_code, e.error_message,
+    e.created_at, e.updated_at
+FROM executions e
+JOIN plans p ON e.plan_id = p.id
+JOIN sites s ON p.site_id = s.id
+WHERE s.id = $1 AND s.tenant_id = $2
+  AND ($3::text[] IS NULL OR e.state = ANY($3))
+ORDER BY e.created_at DESC
+LIMIT $4`
+	rows, err := r.db.QueryContext(ctx, query, siteID, tenantID, pq.Array(statuses), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]ExecutionWithTimestamps, 0)
+	for rows.Next() {
+		var e ExecutionWithTimestamps
+		var errCode, errMsg *string
+		if err := rows.Scan(&e.ID, &e.PlanID, &e.OperationID, &e.OperationType, &e.State, &e.VMID, &errCode, &errMsg, &e.CreatedAt, &e.UpdatedAt); err != nil {
+			return nil, err
+		}
+		e.ErrorCode = errCode
+		e.ErrorMessage = errMsg
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+func (r *PostgresRepo) ListEnrollmentTokens(ctx context.Context, tenantID string) ([]EnrollmentTokenWithStatus, error) {
+	rows, err := r.db.QueryContext(ctx, `
+SELECT 
+    t.id, t.site_id, s.name as site_name,
+    t.created_at, t.expires_at,
+    t.used_at IS NOT NULL as consumed,
+    t.used_at as consumed_at,
+    a.id as consumed_by_agent_id
+FROM enrollment_tokens t
+JOIN sites s ON t.site_id = s.id
+LEFT JOIN agents a ON t.id = a.enrollment_token_id
+WHERE t.tenant_id = $1
+ORDER BY t.created_at DESC`, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]EnrollmentTokenWithStatus, 0)
+	for rows.Next() {
+		var t EnrollmentTokenWithStatus
+		var consumedAt sql.NullTime
+		var consumedByAgentID sql.NullString
+		if err := rows.Scan(&t.ID, &t.SiteID, &t.SiteName, &t.CreatedAt, &t.ExpiresAt, &t.Consumed, &consumedAt, &consumedByAgentID); err != nil {
+			return nil, err
+		}
+		if consumedAt.Valid {
+			t.ConsumedAt = &consumedAt.Time
+		}
+		if consumedByAgentID.Valid {
+			t.ConsumedByAgentID = &consumedByAgentID.String
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+func (r *PostgresRepo) ListAPIKeys(ctx context.Context, tenantID string) ([]APIKey, error) {
+	rows, err := r.db.QueryContext(ctx, `
+SELECT id, tenant_id, name, created_at, expires_at, last_used_at
+FROM api_keys
+WHERE tenant_id = $1
+  AND revoked_at IS NULL
+ORDER BY created_at DESC`, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]APIKey, 0)
+	for rows.Next() {
+		var k APIKey
+		if err := rows.Scan(&k.ID, &k.TenantID, &k.Name, &k.CreatedAt, &k.ExpiresAt, &k.LastUsedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, k)
+	}
+	return out, rows.Err()
+}
+
+func (r *PostgresRepo) DeleteAPIKey(ctx context.Context, tenantID, keyID string) error {
+	var exists bool
+	err := r.db.QueryRowContext(ctx, `
+SELECT EXISTS(SELECT 1 FROM api_keys WHERE id = $1 AND tenant_id = $2 AND revoked_at IS NULL)`,
+		keyID, tenantID).Scan(&exists)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return ErrNotFound
+	}
+	_, err = r.db.ExecContext(ctx, `
+UPDATE api_keys
+SET revoked_at = now()
+WHERE id = $1 AND tenant_id = $2`, keyID, tenantID)
+	return err
+}
+
 func (r *PostgresRepo) getPlanByIdempotencyTx(ctx context.Context, tx *sql.Tx, tenantID, idempotency string) (ApplyPlanResult, bool, error) {
 	row := tx.QueryRowContext(ctx, `
 SELECT id, tenant_id, site_id, idempotency_key, plan_version, status, operations_json, created_at
@@ -1117,4 +1316,392 @@ func newUUID() string {
 		return time.Now().UTC().Format("20060102150405.000000000")
 	}
 	return hex.EncodeToString(b[:])
+}
+
+func (r *PostgresRepo) UnenrollAgent(ctx context.Context, agentID string) error {
+	_, err := r.db.ExecContext(ctx, `
+UPDATE agents
+SET state = 'UNENROLLED',
+    refresh_token_hash = '',
+    cert_serial = '',
+    updated_at = now()
+WHERE id = $1`, agentID)
+	return err
+}
+
+func (r *PostgresRepo) UpdateAgentCertificate(ctx context.Context, agentID, certSerial, refreshTokenHash string) error {
+	_, err := r.db.ExecContext(ctx, `
+UPDATE agents
+SET cert_serial = $2,
+    refresh_token_hash = $3,
+    updated_at = now()
+WHERE id = $1`, agentID, certSerial, refreshTokenHash)
+	return err
+}
+
+func (r *PostgresRepo) ListCertificateHistory(ctx context.Context, agentID string, limit int) ([]CertificateHistory, error) {
+	if limit <= 0 || limit > 1000 {
+		limit = 50
+	}
+	rows, err := r.db.QueryContext(ctx, `
+SELECT id, agent_id, serial, issued_at, expires_at, revoked_at
+FROM certificate_history
+WHERE agent_id = $1
+ORDER BY issued_at DESC
+LIMIT $2`, agentID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]CertificateHistory, 0)
+	for rows.Next() {
+		var h CertificateHistory
+		var revokedAt sql.NullTime
+		if err := rows.Scan(&h.ID, &h.AgentID, &h.Serial, &h.IssuedAt, &h.ExpiresAt, &revokedAt); err != nil {
+			return nil, err
+		}
+		if revokedAt.Valid {
+			h.RevokedAt = &revokedAt.Time
+		}
+		out = append(out, h)
+	}
+	return out, rows.Err()
+}
+
+func (r *PostgresRepo) RecordCertificateIssuance(ctx context.Context, history CertificateHistory) error {
+	_, err := r.db.ExecContext(ctx, `
+INSERT INTO certificate_history (id, agent_id, serial, issued_at, expires_at)
+VALUES ($1, $2, $3, $4, $5)`,
+		history.ID, history.AgentID, history.Serial, history.IssuedAt, history.ExpiresAt)
+	return err
+}
+
+// GetLastAuditEvent returns the most recent audit event (highest ID).
+func (r *PostgresRepo) GetLastAuditEvent(ctx context.Context) (*AuditEvent, error) {
+	row := r.db.QueryRowContext(ctx, `
+SELECT id, tenant_id, COALESCE(site_id::text,''), actor_type,
+       actor_user_id, actor_agent_id, action, resource_type, resource_id,
+       request_id, COALESCE(source_ip::text,''), metadata_json, occurred_at,
+       prev_hash, entry_hash, chain_valid
+FROM audit_events
+ORDER BY id DESC
+LIMIT 1`)
+
+	return scanAuditEvent(row)
+}
+
+// WriteAuditEvent creates a new audit event with chain integrity fields.
+func (r *PostgresRepo) WriteAuditEvent(ctx context.Context, event *AuditEvent) error {
+	return r.db.QueryRowContext(ctx, `
+INSERT INTO audit_events (
+  tenant_id, site_id, actor_type, actor_user_id, actor_agent_id,
+  action, resource_type, resource_id, request_id, source_ip, metadata_json,
+  occurred_at, prev_hash, entry_hash, chain_valid
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12, $13, $14, $15)
+RETURNING id`,
+		nullString(event.TenantID),
+		nullString(event.SiteID),
+		event.ActorType,
+		nullStringPtr(event.ActorUserID),
+		nullStringPtr(event.ActorAgentID),
+		event.Action,
+		event.ResourceType,
+		event.ResourceID,
+		nullString(event.RequestID),
+		nullString(event.SourceIP),
+		string(event.MetadataJSON),
+		event.OccurredAt,
+		event.PrevHash,
+		event.EntryHash,
+		event.ChainValid,
+	).Scan(&event.ID)
+}
+
+// UpdateAuditEventValidity updates the chain_valid flag for an audit event.
+func (r *PostgresRepo) UpdateAuditEventValidity(ctx context.Context, id int64, valid bool) error {
+	_, err := r.db.ExecContext(ctx, `
+UPDATE audit_events
+SET chain_valid = $2
+WHERE id = $1`, id, valid)
+	return err
+}
+
+// ListAuditEvents returns audit events, optionally filtered by tenant.
+// If tenantID is empty, returns all events. If limit is 0, no limit is applied.
+func (r *PostgresRepo) ListAuditEvents(ctx context.Context, tenantID string, limit int) ([]AuditEvent, error) {
+	query := `
+SELECT id, tenant_id, COALESCE(site_id::text,''), actor_type,
+       actor_user_id, actor_agent_id, action, resource_type, resource_id,
+       request_id, COALESCE(source_ip::text,''), metadata_json, occurred_at,
+       prev_hash, entry_hash, chain_valid
+FROM audit_events`
+	args := []interface{}{}
+
+	if tenantID != "" {
+		query += ` WHERE tenant_id = $1`
+		args = append(args, tenantID)
+	}
+
+	query += ` ORDER BY id ASC`
+
+	if limit > 0 {
+		query += ` LIMIT $` + string(rune('0'+len(args)+1))
+		args = append(args, limit)
+	}
+
+	rows, err := r.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]AuditEvent, 0)
+	for rows.Next() {
+		event, err := scanAuditEventRows(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *event)
+	}
+	return out, rows.Err()
+}
+
+// scanAuditEvent scans a single audit event from a row.
+func scanAuditEvent(row *sql.Row) (*AuditEvent, error) {
+	var e AuditEvent
+	var siteID sql.NullString
+	var actorUserID, actorAgentID sql.NullString
+	var requestID, sourceIP sql.NullString
+
+	err := row.Scan(
+		&e.ID,
+		&e.TenantID,
+		&siteID,
+		&e.ActorType,
+		&actorUserID,
+		&actorAgentID,
+		&e.Action,
+		&e.ResourceType,
+		&e.ResourceID,
+		&requestID,
+		&sourceIP,
+		&e.MetadataJSON,
+		&e.OccurredAt,
+		&e.PrevHash,
+		&e.EntryHash,
+		&e.ChainValid,
+	)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	if siteID.Valid {
+		e.SiteID = siteID.String
+	}
+	if actorUserID.Valid {
+		e.ActorUserID = &actorUserID.String
+	}
+	if actorAgentID.Valid {
+		e.ActorAgentID = &actorAgentID.String
+	}
+	if requestID.Valid {
+		e.RequestID = requestID.String
+	}
+	if sourceIP.Valid {
+		e.SourceIP = sourceIP.String
+	}
+
+	return &e, nil
+}
+
+// scanAuditEventRows scans a single audit event from rows.
+func scanAuditEventRows(rows *sql.Rows) (*AuditEvent, error) {
+	var e AuditEvent
+	var siteID sql.NullString
+	var actorUserID, actorAgentID sql.NullString
+	var requestID, sourceIP sql.NullString
+
+	err := rows.Scan(
+		&e.ID,
+		&e.TenantID,
+		&siteID,
+		&e.ActorType,
+		&actorUserID,
+		&actorAgentID,
+		&e.Action,
+		&e.ResourceType,
+		&e.ResourceID,
+		&requestID,
+		&sourceIP,
+		&e.MetadataJSON,
+		&e.OccurredAt,
+		&e.PrevHash,
+		&e.EntryHash,
+		&e.ChainValid,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	if siteID.Valid {
+		e.SiteID = siteID.String
+	}
+	if actorUserID.Valid {
+		e.ActorUserID = &actorUserID.String
+	}
+	if actorAgentID.Valid {
+		e.ActorAgentID = &actorAgentID.String
+	}
+	if requestID.Valid {
+		e.RequestID = requestID.String
+	}
+	if sourceIP.Valid {
+		e.SourceIP = sourceIP.String
+	}
+
+	return &e, nil
+}
+
+// nullString returns nil for empty strings, otherwise returns the string.
+func nullString(s string) interface{} {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
+// nullStringPtr returns sql.NullString for a string pointer.
+func nullStringPtr(s *string) sql.NullString {
+	if s == nil {
+		return sql.NullString{Valid: false}
+	}
+	return sql.NullString{String: *s, Valid: true}
+}
+
+// RevokeCertificate adds a certificate to the revocation list
+func (r *PostgresRepo) RevokeCertificate(ctx context.Context, serial string, reason int, agentID string) error {
+	_, err := r.db.ExecContext(ctx, `
+INSERT INTO crl_entries (serial, revoked_at, reason, agent_id)
+VALUES ($1, now(), $2, $3)
+ON CONFLICT (serial) DO NOTHING`,
+		serial, reason, nullable(agentID))
+	return err
+}
+
+// IsCertificateRevoked checks if a certificate serial is revoked
+func (r *PostgresRepo) IsCertificateRevoked(ctx context.Context, serial string) (bool, error) {
+	var exists bool
+	err := r.db.QueryRowContext(ctx, `
+SELECT EXISTS(SELECT 1 FROM crl_entries WHERE serial = $1)`, serial).Scan(&exists)
+	return exists, err
+}
+
+// ListRevokedCertificates returns all revoked certificates
+func (r *PostgresRepo) ListRevokedCertificates(ctx context.Context) ([]CRLEntry, error) {
+	rows, err := r.db.QueryContext(ctx, `
+SELECT serial, revoked_at, reason, COALESCE(agent_id::text,'')
+FROM crl_entries
+ORDER BY revoked_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]CRLEntry, 0)
+	for rows.Next() {
+		var e CRLEntry
+		var agentID sql.NullString
+		if err := rows.Scan(&e.SerialNumber, &e.RevokedAt, &e.Reason, &agentID); err != nil {
+			return nil, err
+		}
+		if agentID.Valid {
+			e.AgentID = agentID.String
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// GetTenantUsage returns current resource usage counts for a tenant
+func (r *PostgresRepo) GetTenantUsage(ctx context.Context, tenantID string) (*TenantUsage, error) {
+	usage := &TenantUsage{}
+
+	// Count sites
+	err := r.db.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM sites WHERE tenant_id = $1`, tenantID).Scan(&usage.Sites)
+	if err != nil {
+		return nil, fmt.Errorf("failed to count sites: %w", err)
+	}
+
+	// Count agents
+	err = r.db.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM agents WHERE tenant_id = $1`, tenantID).Scan(&usage.Agents)
+	if err != nil {
+		return nil, fmt.Errorf("failed to count agents: %w", err)
+	}
+
+	// Count VMs
+	err = r.db.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM microvms WHERE tenant_id = $1`, tenantID).Scan(&usage.VMs)
+	if err != nil {
+		return nil, fmt.Errorf("failed to count VMs: %w", err)
+	}
+
+	// Count active plans (PENDING or IN_PROGRESS)
+	err = r.db.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM plans WHERE tenant_id = $1 AND status IN ('PENDING', 'IN_PROGRESS')`, tenantID).Scan(&usage.ActivePlans)
+	if err != nil {
+		return nil, fmt.Errorf("failed to count active plans: %w", err)
+	}
+
+	// Count API keys (non-revoked)
+	err = r.db.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM api_keys WHERE tenant_id = $1 AND revoked_at IS NULL`, tenantID).Scan(&usage.APIKeys)
+	if err != nil {
+		return nil, fmt.Errorf("failed to count API keys: %w", err)
+	}
+
+	return usage, nil
+}
+
+// tenantLimitsCache is a simple in-memory cache for tenant quota limits
+// In production, this should be backed by the database
+var (
+	tenantLimitsCache   = make(map[string]QuotaLimits)
+	tenantLimitsCacheMu sync.RWMutex
+)
+
+// GetTenantLimits returns quota limits for a tenant
+// Currently uses in-memory cache with defaults; could be extended to use database
+func (r *PostgresRepo) GetTenantLimits(ctx context.Context, tenantID string) (*QuotaLimits, error) {
+	tenantLimitsCacheMu.RLock()
+	limits, ok := tenantLimitsCache[tenantID]
+	tenantLimitsCacheMu.RUnlock()
+
+	if ok {
+		return &limits, nil
+	}
+
+	// Return default limits
+	return &QuotaLimits{
+		MaxSites:           10,
+		MaxAgentsPerSite:   100,
+		MaxVMsPerAgent:     50,
+		MaxConcurrentPlans: 100,
+		MaxAPIKeys:         20,
+	}, nil
+}
+
+// SetTenantLimits sets quota limits for a tenant
+// Currently uses in-memory cache; could be extended to use database
+func (r *PostgresRepo) SetTenantLimits(ctx context.Context, tenantID string, limits QuotaLimits) error {
+	tenantLimitsCacheMu.Lock()
+	defer tenantLimitsCacheMu.Unlock()
+	tenantLimitsCache[tenantID] = limits
+	return nil
 }

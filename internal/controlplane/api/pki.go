@@ -83,6 +83,14 @@ func (c *InternalCA) CertPEM() []byte {
 	return append([]byte(nil), c.certPEM...)
 }
 
+func (c *InternalCA) Certificate() *x509.Certificate {
+	return c.cert
+}
+
+func (c *InternalCA) Key() *rsa.PrivateKey {
+	return c.key
+}
+
 func (c *InternalCA) SignAgentCSR(csrPEM []byte, agentID, tenantID, siteID string, ttl time.Duration) (certPEM []byte, serial string, err error) {
 	_ = tenantID
 	_ = siteID
@@ -102,6 +110,10 @@ func (c *InternalCA) SignAgentCSR(csrPEM []byte, agentID, tenantID, siteID strin
 		return nil, "", err
 	}
 	now := time.Now().UTC()
+
+	// Get CRL URL from environment
+	crlURL := os.Getenv("CRL_URL")
+
 	tmpl := &x509.Certificate{
 		SerialNumber: serialNum,
 		Subject: pkix.Name{
@@ -113,6 +125,12 @@ func (c *InternalCA) SignAgentCSR(csrPEM []byte, agentID, tenantID, siteID strin
 		KeyUsage:    x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
 		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
 	}
+
+	// Add CRL Distribution Point if configured
+	if crlURL != "" {
+		tmpl.CRLDistributionPoints = []string{crlURL}
+	}
+
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, c.cert, csr.PublicKey, c.key)
 	if err != nil {
 		return nil, "", err

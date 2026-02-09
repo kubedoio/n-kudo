@@ -308,6 +308,21 @@ func (p *Provider) Stop(ctx context.Context, vmID string) error { return p.StopV
 // Delete keeps executor.MicroVMProvider compatibility.
 func (p *Provider) Delete(ctx context.Context, vmID string) error { return p.DeleteVM(ctx, vmID) }
 
+// GetProcessID keeps executor.MicroVMProvider compatibility.
+func (p *Provider) GetProcessID(ctx context.Context, vmID string) (int, error) {
+	if err := p.ensureDefaults(); err != nil {
+		return 0, err
+	}
+	meta, err := p.loadMeta(vmID)
+	if err != nil {
+		return 0, err
+	}
+	if meta.PID <= 0 {
+		return 0, fmt.Errorf("VM %s has no running process", vmID)
+	}
+	return meta.PID, nil
+}
+
 func (p *Provider) BuildCreateParamsFromVM(vm state.MicroVM) executor.MicroVMParams {
 	return executor.MicroVMParams{
 		VMID:       vm.ID,

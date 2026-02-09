@@ -9,10 +9,14 @@ import (
 type ActionType string
 
 const (
-	ActionMicroVMCreate ActionType = "MicroVMCreate"
-	ActionMicroVMStart  ActionType = "MicroVMStart"
-	ActionMicroVMStop   ActionType = "MicroVMStop"
-	ActionMicroVMDelete ActionType = "MicroVMDelete"
+	ActionMicroVMCreate    ActionType = "MicroVMCreate"
+	ActionMicroVMStart     ActionType = "MicroVMStart"
+	ActionMicroVMStop      ActionType = "MicroVMStop"
+	ActionMicroVMDelete    ActionType = "MicroVMDelete"
+	ActionMicroVMPause     ActionType = "MicroVMPause"
+	ActionMicroVMResume    ActionType = "MicroVMResume"
+	ActionMicroVMSnapshot  ActionType = "MicroVMSnapshot"
+	ActionCommandExecute   ActionType = "CommandExecute"
 )
 
 type Plan struct {
@@ -40,6 +44,26 @@ type MicroVMParams struct {
 	ExtraArgs  []string `json:"extra_args,omitempty"`
 }
 
+type PauseParams struct {
+	VMID string `json:"vm_id"`
+}
+
+type ResumeParams struct {
+	VMID string `json:"vm_id"`
+}
+
+type SnapshotParams struct {
+	VMID         string `json:"vm_id"`
+	SnapshotName string `json:"snapshot_name"`
+}
+
+type CommandParams struct {
+	Command string   `json:"command"`
+	Args    []string `json:"args"`
+	Timeout int      `json:"timeout_seconds"`
+	Dir     string   `json:"working_dir,omitempty"`
+}
+
 type ActionResult struct {
 	ExecutionID string    `json:"execution_id"`
 	ActionID    string    `json:"action_id"`
@@ -61,6 +85,7 @@ type MicroVMProvider interface {
 	Start(context.Context, string) error
 	Stop(context.Context, string) error
 	Delete(context.Context, string) error
+	GetProcessID(context.Context, string) (int, error)
 }
 
 type LogEntry struct {

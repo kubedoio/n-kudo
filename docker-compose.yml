@@ -1,0 +1,514 @@
+version: "3.9"
+
+# =============================================================================
+# n-kudo Production Docker Compose Configuration
+# =============================================================================
+# This compose file is configured for production deployments with:
+# - Health checks for all services
+# - Resource limits (CPU/memory)
+# - Restart policies
+# - Log rotation
+# - Network security
+# - Volume management
+#
+# Prerequisites:
+# - Docker 24.0+ and Docker Compose 2.20+
+# - 4GB RAM minimum, 8GB recommended
+# - 20GB free disk space
+#
+# Usage:
+#   cp .env.production.example .env.production
+#   # Edit .env.production with your values
+#   docker compose -f docker-compose.yml --env-file .env.production up -d
+# =============================================================================
+
+services:
+  # ===========================================================================
+  # PostgreSQL Database
+  # ===========================================================================
+  postgres:
+    image: postgres:16-alpine
+    container_name: nkudo-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-nkudo}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-nkudo}
+      # Performance tuning
+      PGDATA: /var/lib/postgresql/data/pgdata
+    command: >
+      postgres
+      -c max_connections=${POSTGRES_MAX_CONNECTIONS:-100}
+      -c shared_buffers=${POSTGRES_SHARED_BUFFERS:-256MB}
+      -c maintenance_work_mem=${POSTGRES_MAINTENANCE_WORK_MEM:-64MB}
+      -c checkpoint_completion_target=0.9
+      -c wal_buffers=16MB
+      -c default_statistics_target=100
+      -c random_page_cost=1.1
+      -c effective_io_concurrency=200
+      -c work_mem=${POSTGRES_WORK_MEM:-4MB}
+      -c min_wal_size=1GB
+      -c max_wal_size=4GB
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - type: volume
+        source: nkudo_pgdata
+        target: /var/lib/postgresql/data
+      - type: bind
+        source: ./db/migrations
+        target: /docker-entrypoint-initdb.d
+        read_only: true
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-nkudo} -d ${POSTGRES_DB:-nkudo}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - nkudo-backend
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+        labels: "service_name,environment"
+        tag: "{{.ImageName}}/{{.Name}}/{{.ID}}"
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/run/postgresql
+
+  # ===========================================================================
+  # Control Plane (Backend API)
+  # ===========================================================================
+  backend:
+    build:
+      context: .
+      dockerfile: deployments/docker/Dockerfile.control-plane
+    container_name: nkudo-backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # Database
+      DATABASE_URL: ${DATABASE_URL}
+      # Security
+      ADMIN_KEY: ${ADMIN_KEY}
+      # Server configuration
+      CONTROL_PLANE_ADDR: ${CONTROL_PLANE_ADDR:-:8443}
+      CA_COMMON_NAME: ${CA_COMMON_NAME:-n-kudo-agent-ca}
+      # TLS configuration
+      CA_CERT_FILE: ${CA_CERT_FILE:-}
+      CA_KEY_FILE: ${CA_KEY_FILE:-}
+      SERVER_CERT_FILE: ${SERVER_CERT_FILE:-}
+      SERVER_KEY_FILE: ${SERVER_KEY_FILE:-}
+      REQUIRE_PERSISTENT_PKI: ${REQUIRE_PERSISTENT_PKI:-true}
+      # Timeouts
+      HTTP_READ_TIMEOUT: ${HTTP_READ_TIMEOUT:-30s}
+      HTTP_WRITE_TIMEOUT: ${HTTP_WRITE_TIMEOUT:-60s}
+      HTTP_IDLE_TIMEOUT: ${HTTP_IDLE_TIMEOUT:-120s}
+      HTTP_SHUTDOWN_TIMEOUT: ${HTTP_SHUTDOWN_TIMEOUT:-30s}
+      # Enrollment and certificates
+      DEFAULT_ENROLLMENT_TTL: ${DEFAULT_ENROLLMENT_TTL:-15m}
+      AGENT_CERT_TTL: ${AGENT_CERT_TTL:-24h}
+      # Heartbeat settings
+      HEARTBEAT_INTERVAL: ${HEARTBEAT_INTERVAL:-15s}
+      HEARTBEAT_OFFLINE_AFTER: ${HEARTBEAT_OFFLINE_AFTER:-60s}
+      OFFLINE_SWEEP_INTERVAL: ${OFFLINE_SWEEP_INTERVAL:-15s}
+      # Plans
+      PLAN_LEASE_TTL: ${PLAN_LEASE_TTL:-45s}
+      MAX_PENDING_PLANS: ${MAX_PENDING_PLANS:-10}
+      # Feature flags
+      METRICS_ENABLED: ${METRICS_ENABLED:-true}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    command: >
+      sh -c "
+        echo 'Running database migrations...' &&
+        /app/control-plane migrate -dir /app/db/migrations &&
+        echo 'Starting control plane server...' &&
+        exec /app/control-plane serve
+      "
+    ports:
+      - "${BACKEND_PORT:-8443}:8443"
+    volumes:
+      - type: volume
+        source: nkudo_pki
+        target: /app/pki
+      - type: bind
+        source: ./db/migrations
+        target: /app/db/migrations
+        read_only: true
+    healthcheck:
+      test: >
+        wget --no-verbose --tries=1 --spider 
+        https://localhost:8443/healthz 
+        --no-check-certificate 2>/dev/null || exit 1
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    networks:
+      - nkudo-backend
+      - nkudo-frontend
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+        labels: "service_name,environment"
+        tag: "{{.ImageName}}/{{.Name}}/{{.ID}}"
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+
+  # ===========================================================================
+  # Frontend (React + Vite + Nginx)
+  # ===========================================================================
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: ../deployments/docker/Dockerfile.frontend
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-https://backend:8443}
+    container_name: nkudo-frontend
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      VITE_API_BASE_URL: ${VITE_API_BASE_URL:-https://backend:8443}
+      NGINX_WORKER_PROCESSES: ${NGINX_WORKER_PROCESSES:-auto}
+      NGINX_WORKER_CONNECTIONS: ${NGINX_WORKER_CONNECTIONS:-1024}
+    ports:
+      - "${FRONTEND_PORT:-3000}:80"
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:80/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - nkudo-frontend
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+        labels: "service_name,environment"
+        tag: "{{.ImageName}}/{{.Name}}/{{.ID}}"
+    security_opt:
+      - no-new-privileges:true
+    read_only: false
+    tmpfs:
+      - /tmp
+      - /var/cache/nginx
+      - /var/run
+
+  # ===========================================================================
+  # Edge Agent (Optional - for local testing)
+  # ===========================================================================
+  # Uncomment to run edge agent in Docker for testing
+  # Note: For production, edge agents run on actual edge hosts
+  # edge:
+  #   build:
+  #     context: .
+  #     dockerfile: deployments/docker/Dockerfile.edge
+  #   container_name: nkudo-edge
+  #   restart: unless-stopped
+  #   depends_on:
+  #     backend:
+  #       condition: service_healthy
+  #   environment:
+  #     NKUDO_CONTROL_PLANE: ${NKUDO_CONTROL_PLANE:-https://backend:8443}
+  #     NKUDO_ENROLL_TOKEN: ${NKUDO_ENROLL_TOKEN}
+  #     NKUDO_STATE_DIR: /var/lib/nkudo-edge/state
+  #     NKUDO_PKI_DIR: /var/lib/nkudo-edge/pki
+  #     NKUDO_HEARTBEAT_INTERVAL: ${NKUDO_HEARTBEAT_INTERVAL:-15s}
+  #     NKUDO_LOG_LEVEL: ${NKUDO_LOG_LEVEL:-info}
+  #   volumes:
+  #     - type: volume
+  #       source: nkudo_edge_state
+  #       target: /var/lib/nkudo-edge/state
+  #     - type: volume
+  #       source: nkudo_edge_pki
+  #       target: /var/lib/nkudo-edge/pki
+  #   networks:
+  #     - nkudo-backend
+  #   deploy:
+  #     resources:
+  #       limits:
+  #         cpus: '1.0'
+  #         memory: 512M
+  #   logging:
+  #     driver: "json-file"
+  #     options:
+  #       max-size: "10m"
+  #       max-file: "3"
+
+  # ===========================================================================
+  # Prometheus - Metrics Collection
+  # ===========================================================================
+  prometheus:
+    image: prom/prometheus:v2.48.0
+    container_name: nkudo-prometheus
+    restart: unless-stopped
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=15d'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+      - '--web.enable-lifecycle'
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - type: bind
+        source: ./deployments/monitoring/prometheus.yml
+        target: /etc/prometheus/prometheus.yml
+        read_only: true
+      - type: bind
+        source: ./deployments/monitoring/alerts.yml
+        target: /etc/prometheus/alerts.yml
+        read_only: true
+      - type: volume
+        source: nkudo_prometheus_data
+        target: /prometheus
+    networks:
+      - nkudo-backend
+      - nkudo-monitoring
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ===========================================================================
+  # Alertmanager - Alert Routing
+  # ===========================================================================
+  alertmanager:
+    image: prom/alertmanager:v0.26.0
+    container_name: nkudo-alertmanager
+    restart: unless-stopped
+    command:
+      - '--config.file=/etc/alertmanager/alertmanager.yml'
+      - '--storage.path=/alertmanager'
+      - '--web.external-url=http://localhost:9093'
+      - '--cluster.advertise-address=0.0.0.0:9093'
+    ports:
+      - "${ALERTMANAGER_PORT:-9093}:9093"
+    volumes:
+      - type: bind
+        source: ./deployments/monitoring/alertmanager.yml
+        target: /etc/alertmanager/alertmanager.yml
+        read_only: true
+      - type: volume
+        source: nkudo_alertmanager_data
+        target: /alertmanager
+    environment:
+      - ALERTMANAGER_SMTP_FROM=${ALERTMANAGER_SMTP_FROM:-alerts@nkudo.io}
+      - ALERTMANAGER_SMTP_HOST=${ALERTMANAGER_SMTP_HOST:-smtp.example.com:587}
+      - ALERTMANAGER_SMTP_USER=${ALERTMANAGER_SMTP_USER:-}
+      - ALERTMANAGER_SMTP_PASS=${ALERTMANAGER_SMTP_PASS:-}
+      - ALERTMANAGER_PD_SERVICE_KEY=${ALERTMANAGER_PD_SERVICE_KEY:-}
+      - ALERTMANAGER_SLACK_WEBHOOK=${ALERTMANAGER_SLACK_WEBHOOK:-}
+    networks:
+      - nkudo-backend
+      - nkudo-monitoring
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ===========================================================================
+  # Grafana - Visualization Dashboards
+  # ===========================================================================
+  grafana:
+    image: grafana/grafana:10.2.3
+    container_name: nkudo-grafana
+    restart: unless-stopped
+    ports:
+      - "${GRAFANA_PORT:-3001}:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
+      - GF_SECURITY_SECRET_KEY=${GRAFANA_SECRET_KEY:-nkudo-secret}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_USERS_AUTO_ASSIGN_ORG=true
+      - GF_USERS_AUTO_ASSIGN_ORG_ROLE=Viewer
+      - GF_AUTH_ANONYMOUS_ENABLED=false
+      - GF_INSTALL_PLUGINS=grafana-clock-panel,grafana-simple-json-datasource
+      - GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/var/lib/grafana/dashboards/nkudo-dashboard.json
+      - GF_SERVER_ROOT_URL=${GRAFANA_ROOT_URL:-http://localhost:3001}
+    volumes:
+      - type: bind
+        source: ./deployments/monitoring/grafana-dashboard.json
+        target: /var/lib/grafana/dashboards/nkudo-dashboard.json
+        read_only: true
+      - type: bind
+        source: ./deployments/monitoring/grafana-datasources.yml
+        target: /etc/grafana/provisioning/datasources/datasources.yml
+        read_only: true
+      - type: bind
+        source: ./deployments/monitoring/grafana-dashboards.yml
+        target: /etc/grafana/provisioning/dashboards/dashboards.yml
+        read_only: true
+      - type: volume
+        source: nkudo_grafana_data
+        target: /var/lib/grafana
+    networks:
+      - nkudo-backend
+      - nkudo-monitoring
+      - nkudo-frontend
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    depends_on:
+      - prometheus
+
+  # ===========================================================================
+  # Log Rotation Sidecar (Optional)
+  # ===========================================================================
+  # Uncomment to enable automatic log rotation for volumes
+  # logrotate:
+  #   image: alpine:3.19
+  #   container_name: nkudo-logrotate
+  #   restart: unless-stopped
+  #   volumes:
+  #     - /var/lib/docker/containers:/var/lib/docker/containers:ro
+  #     - ./scripts/logrotate.conf:/etc/logrotate.conf:ro
+  #   command: >
+  #     sh -c "
+  #       apk add --no-cache logrotate &&
+  #       echo '0 2 * * * /usr/sbin/logrotate /etc/logrotate.conf' | crontab - &&
+  #       crond -f
+  #     "
+  #   deploy:
+  #     resources:
+  #       limits:
+  #         cpus: '0.25'
+  #         memory: 64M
+
+# =============================================================================
+# Volumes
+# =============================================================================
+volumes:
+  nkudo_pgdata:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${DATA_DIR:-./data}/postgres
+  nkudo_pki:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${DATA_DIR:-./data}/pki
+  nkudo_prometheus_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${DATA_DIR:-./data}/prometheus
+  nkudo_alertmanager_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${DATA_DIR:-./data}/alertmanager
+  nkudo_grafana_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${DATA_DIR:-./data}/grafana
+  # nkudo_edge_state:
+  #   driver: local
+  # nkudo_edge_pki:
+  #   driver: local
+
+# =============================================================================
+# Networks
+# =============================================================================
+networks:
+  nkudo-backend:
+    driver: bridge
+    internal: false
+    ipam:
+      config:
+        - subnet: 172.20.0.0/24
+    labels:
+      - "com.nkudo.network=backend"
+  nkudo-frontend:
+    driver: bridge
+    internal: false
+    ipam:
+      config:
+        - subnet: 172.20.1.0/24
+    labels:
+      - "com.nkudo.network=frontend"
+  nkudo-monitoring:
+    driver: bridge
+    internal: false
+    ipam:
+      config:
+        - subnet: 172.20.2.0/24
+    labels:
+      - "com.nkudo.network=monitoring"

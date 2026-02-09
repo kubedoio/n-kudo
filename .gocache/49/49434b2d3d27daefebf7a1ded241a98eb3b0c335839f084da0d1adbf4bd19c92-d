@@ -1,8 +1,0 @@
-# test log
-getenv NKUDO_TEST_TOKEN
-getenv TMPDIR
-open /var/folders/w8/09p__rt95t31x21hj0mbvf340000gn/T/TestResolveTokenPrecedence1227331820/001/token.txt
-getenv NKUDO_TEST_TOKEN
-getenv NKUDO_TEST_TOKEN
-open /var/folders/w8/09p__rt95t31x21hj0mbvf340000gn/T/TestResolveTokenPrecedence1227331820/001/token.txt
-open /var/folders/w8/09p__rt95t31x21hj0mbvf340000gn/T
