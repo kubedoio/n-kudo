@@ -1,0 +1,77 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "nkudo.fullname" . }}
+  labels:
+    {{- include "nkudo.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "nkudo.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Allow HTTP traffic
+    - ports:
+        - protocol: TCP
+          port: {{ .Values.service.httpPort }}
+        - protocol: TCP
+          port: {{ .Values.service.grpcPort }}
+      {{- if or .Values.networkPolicy.ingress.fromNamespaces .Values.networkPolicy.ingress.fromPods .Values.networkPolicy.ingress.fromCIDR }}
+      from:
+        {{- range .Values.networkPolicy.ingress.fromNamespaces }}
+        - namespaceSelector:
+            matchLabels:
+              name: {{ . | quote }}
+        {{- end }}
+        {{- if .Values.networkPolicy.ingress.fromPods }}
+        - podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.ingress.fromPods | nindent 14 }}
+        {{- end }}
+        {{- range .Values.networkPolicy.ingress.fromCIDR }}
+        - ipBlock:
+            cidr: {{ . }}
+        {{- end }}
+      {{- end }}
+    # Allow metrics scraping
+    - ports:
+        - protocol: TCP
+          port: {{ .Values.service.metricsPort }}
+      from:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+  egress:
+    # Allow DNS
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+      to:
+        - namespaceSelector: {}
+    # Allow database connection
+    - ports:
+        - protocol: TCP
+          port: {{ if .Values.postgresql.enabled }}5432{{ else }}{{ .Values.database.external.port }}{{ end }}
+    # Allow external egress if enabled
+    {{- if .Values.networkPolicy.egress.allowExternal }}
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 169.254.0.0/16
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+    {{- end }}
+    {{- range .Values.networkPolicy.egress.toCIDR }}
+    - to:
+        - ipBlock:
+            cidr: {{ . }}
+    {{- end }}
+{{- end }}

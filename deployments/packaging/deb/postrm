@@ -1,0 +1,38 @@
+#!/bin/bash
+set -e
+
+# n-kudo edge agent post-removal script
+
+USER="nkudo-edge"
+GROUP="nkudo-edge"
+DATA_DIR="/var/lib/nkudo-edge"
+CONFIG_DIR="/etc/nkudo-edge"
+
+# Reload systemd daemon
+systemctl daemon-reload 2>/dev/null || true
+
+# On purge, remove all data
+if [ "$1" = "purge" ]; then
+    # Remove data directory
+    if [ -d "$DATA_DIR" ]; then
+        rm -rf "$DATA_DIR"
+    fi
+    
+    # Remove config directory
+    if [ -d "$CONFIG_DIR" ]; then
+        rm -rf "$CONFIG_DIR"
+    fi
+    
+    # Remove user and group
+    if id -u "$USER" > /dev/null 2>&1; then
+        userdel "$USER" 2>/dev/null || true
+    fi
+    
+    if getent group "$GROUP" > /dev/null 2>&1; then
+        groupdel "$GROUP" 2>/dev/null || true
+    fi
+fi
+
+#DEBHELPER#
+
+exit 0

@@ -15,6 +15,22 @@ type Tenant struct {
 	UpdatedAt     time.Time `json:"updated_at"`
 }
 
+// User represents a tenant user with authentication
+type User struct {
+	ID                string     `json:"id"`
+	TenantID          string     `json:"tenant_id"`
+	Email             string     `json:"email"`
+	DisplayName       string     `json:"display_name"`
+	Role              string     `json:"role"` // OWNER, ADMIN, OPERATOR, VIEWER
+	IsActive          bool       `json:"is_active"`
+	EmailVerified     bool       `json:"email_verified"`
+	PasswordHash      string     `json:"-"` // Never expose in JSON
+	LastLoginAt       *time.Time `json:"last_login_at,omitempty"`
+	PasswordChangedAt time.Time  `json:"password_changed_at"`
+	CreatedAt         time.Time  `json:"created_at"`
+	UpdatedAt         time.Time  `json:"updated_at"`
+}
+
 type Site struct {
 	ID                string     `json:"id"`
 	TenantID          string     `json:"tenant_id"`
@@ -301,6 +317,30 @@ type TenantUsage struct {
 	APIKeys     int `json:"api_keys"`
 }
 
+// ProjectInvitation represents an invitation to join a project
+type ProjectInvitation struct {
+	ID               string     `json:"id"`
+	TenantID         string     `json:"tenant_id"`
+	Email            string     `json:"email"`
+	Role             string     `json:"role"`
+	InvitedByUserID  string     `json:"invited_by_user_id"`
+	TokenHash        string     `json:"-"`
+	Status           string     `json:"status"`
+	ExpiresAt        time.Time  `json:"expires_at"`
+	AcceptedAt       *time.Time `json:"accepted_at,omitempty"`
+	DeclinedAt       *time.Time `json:"declined_at,omitempty"`
+	CancelledAt      *time.Time `json:"cancelled_at,omitempty"`
+	CreatedAt        time.Time  `json:"created_at"`
+	UpdatedAt        time.Time  `json:"updated_at"`
+}
+
+// ProjectInvitationWithProject includes project details for user invitations
+type ProjectInvitationWithProject struct {
+	ProjectInvitation
+	ProjectName string `json:"project_name"`
+	ProjectSlug string `json:"project_slug"`
+}
+
 // QuotaLimits represents quota limits for a tenant
 type QuotaLimits struct {
 	MaxSites           int `json:"max_sites"`
@@ -335,6 +375,23 @@ type CRLEntry struct {
 type Repo interface {
 	Close() error
 	CreateTenant(ctx context.Context, t Tenant) (Tenant, error)
+	ListTenants(ctx context.Context) ([]Tenant, error)
+	GetTenantByID(ctx context.Context, tenantID string) (Tenant, error)
+
+	// User authentication methods
+	CreateUser(ctx context.Context, user User) (User, error)
+	GetUserByEmail(ctx context.Context, email string) (User, error)
+	GetUserByEmailAndTenant(ctx context.Context, email, tenantID string) (User, error)
+	GetUserByID(ctx context.Context, tenantID, userID string) (User, error)
+	UpdateUserLastLogin(ctx context.Context, tenantID, userID string) error
+	UpdateUserPassword(ctx context.Context, tenantID, userID, passwordHash string) error
+	EmailExists(ctx context.Context, email string) (bool, error)
+	
+	// Email verification methods
+	CreateEmailVerificationToken(ctx context.Context, userID, tenantID, tokenHash string, expiresAt time.Time) error
+	VerifyEmailToken(ctx context.Context, tokenHash string) (userID, tenantID string, err error)
+	MarkEmailVerified(ctx context.Context, tenantID, userID string) error
+	
 	CreateAPIKey(ctx context.Context, key APIKey) (APIKey, error)
 	ValidateAPIKey(ctx context.Context, keyHash string) (APIKeyValidation, error)
 	CreateSite(ctx context.Context, site Site) (Site, error)
@@ -379,4 +436,71 @@ type Repo interface {
 	GetTenantUsage(ctx context.Context, tenantID string) (*TenantUsage, error)
 	GetTenantLimits(ctx context.Context, tenantID string) (*QuotaLimits, error)
 	SetTenantLimits(ctx context.Context, tenantID string, limits QuotaLimits) error
+
+	// Team invitation methods
+	CreateInvitation(ctx context.Context, invitation ProjectInvitation) error
+	GetInvitationByToken(ctx context.Context, tokenHash string) (*ProjectInvitation, error)
+	ListPendingInvitations(ctx context.Context, tenantID string) ([]ProjectInvitation, error)
+	ListUserInvitations(ctx context.Context, email string) ([]ProjectInvitationWithProject, error)
+	AcceptInvitation(ctx context.Context, invitationID, userID string) error
+	DeclineInvitation(ctx context.Context, invitationID string) error
+	CancelInvitation(ctx context.Context, tenantID, invitationID string) error
+	GetInvitationByID(ctx context.Context, tenantID, invitationID string) (*ProjectInvitation, error)
+
+	// VXLAN network methods
+	CreateVXLANNetwork(ctx context.Context, tenantID, siteID string, network VXLANNetwork) (VXLANNetwork, error)
+	ListVXLANNetworks(ctx context.Context, tenantID, siteID string) ([]VXLANNetwork, error)
+	GetVXLANNetwork(ctx context.Context, tenantID, networkID string) (VXLANNetwork, error)
+	GetVXLANNetworkByVNI(ctx context.Context, tenantID string, vni int) (VXLANNetwork, error)
+	DeleteVXLANNetwork(ctx context.Context, tenantID, networkID string) error
+	VXLANNetworkBelongsToTenant(ctx context.Context, networkID, tenantID string) (bool, error)
+
+	// VXLAN tunnel methods
+	CreateVXLANTunnel(ctx context.Context, tunnel VXLANTunnel) (VXLANTunnel, error)
+	ListVXLANTunnels(ctx context.Context, networkID string) ([]VXLANTunnel, error)
+	GetVXLANTunnel(ctx context.Context, networkID, hostID string) (VXLANTunnel, error)
+	UpdateVXLANTunnelStatus(ctx context.Context, tunnelID string, status string) error
+	DeleteVXLANTunnel(ctx context.Context, tunnelID string) error
+
+	// VM network attachment methods
+	AttachVMToNetwork(ctx context.Context, attachment VMNetworkAttachment) (VMNetworkAttachment, error)
+	DetachVMFromNetwork(ctx context.Context, vmID, networkID string) error
+	ListVMNetworkAttachments(ctx context.Context, vmID string) ([]VMNetworkAttachment, error)
+	ListNetworkVMAttachments(ctx context.Context, networkID string) ([]VMNetworkAttachment, error)
+}
+
+// VXLANNetwork represents a VXLAN network
+type VXLANNetwork struct {
+	ID        string    `json:"id"`
+	TenantID  string    `json:"tenant_id"`
+	SiteID    string    `json:"site_id"`
+	Name      string    `json:"name"`
+	VNI       int       `json:"vni"`
+	CIDR      string    `json:"cidr"`
+	Gateway   string    `json:"gateway,omitempty"`
+	MTU       int       `json:"mtu"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// VXLANTunnel represents a VXLAN tunnel endpoint on a host
+type VXLANTunnel struct {
+	ID        string    `json:"id"`
+	NetworkID string    `json:"network_id"`
+	HostID    string    `json:"host_id"`
+	LocalIP   string    `json:"local_ip"`
+	VTEPName  string    `json:"vtep_name"`
+	Status    string    `json:"status"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// VMNetworkAttachment represents a VM's attachment to a VXLAN network
+type VMNetworkAttachment struct {
+	ID         string    `json:"id"`
+	VMID       string    `json:"vm_id"`
+	NetworkID  string    `json:"network_id"`
+	IPAddress  string    `json:"ip_address,omitempty"`
+	MACAddress string    `json:"mac_address,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
 }

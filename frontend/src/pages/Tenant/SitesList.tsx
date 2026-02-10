@@ -9,6 +9,7 @@ import {
   MoreVertical,
   Globe,
   Activity,
+  FolderOpen,
 } from 'lucide-react';
 import {
   Card,
@@ -24,7 +25,7 @@ import { toast } from '@/stores/toastStore';
 import { useQueryClient } from '@tanstack/react-query';
 
 export function SitesList() {
-  const { tenantId } = useParams<{ tenantId: string }>();
+  const { projectId } = useParams<{ projectId: string }>();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [searchQuery, setSearchQuery] = useState('');
@@ -35,7 +36,7 @@ export function SitesList() {
   const [newSiteKey, setNewSiteKey] = useState('');
   const [newSiteLocation, setNewSiteLocation] = useState('');
 
-  const { data: sites, isLoading, error } = useSites(tenantId || '');
+  const { data: sites, isLoading, error } = useSites(projectId || '');
 
   const createSiteMutation = useCreateSite({
     onSuccess: () => {
@@ -43,8 +44,8 @@ export function SitesList() {
       setIsCreateModalOpen(false);
       resetForm();
       // Invalidate sites query to refresh the list
-      if (tenantId) {
-        queryClient.invalidateQueries({ queryKey: queryKeys.sites(tenantId) });
+      if (projectId) {
+        queryClient.invalidateQueries({ queryKey: queryKeys.sites(projectId) });
       }
     },
     onError: (error) => {
@@ -65,10 +66,10 @@ export function SitesList() {
   );
 
   const handleCreateSite = () => {
-    if (!tenantId || !newSiteName.trim()) return;
+    if (!projectId || !newSiteName.trim()) return;
 
     createSiteMutation.mutate({
-      tenantId,
+      tenantId: projectId,
       data: {
         name: newSiteName.trim(),
         external_key: newSiteKey.trim() || undefined,
@@ -107,9 +108,9 @@ export function SitesList() {
     return (
       <div className="space-y-6">
         <div className="flex items-center gap-2 text-sm text-gray-500">
-          <Link to="/admin/tenants" className="hover:text-gray-700 flex items-center gap-1">
+          <Link to={`/projects/${projectId}`} className="hover:text-gray-700 flex items-center gap-1">
             <ArrowLeft className="w-4 h-4" />
-            Back to Tenants
+            Back to Project
           </Link>
           <span>/</span>
           <span className="text-gray-900 font-medium">Sites</span>
@@ -121,8 +122,8 @@ export function SitesList() {
           action={{
             label: 'Retry',
             onClick: () => {
-              if (tenantId) {
-                queryClient.invalidateQueries({ queryKey: queryKeys.sites(tenantId) });
+              if (projectId) {
+                queryClient.invalidateQueries({ queryKey: queryKeys.sites(projectId) });
               }
             },
           }}
@@ -135,9 +136,9 @@ export function SitesList() {
     <div className="space-y-6">
       {/* Breadcrumb */}
       <div className="flex items-center gap-2 text-sm text-gray-500">
-        <Link to="/admin/tenants" className="hover:text-gray-700 flex items-center gap-1">
-          <ArrowLeft className="w-4 h-4" />
-          Back to Tenants
+        <Link to={`/projects/${projectId}`} className="hover:text-gray-700 flex items-center gap-1">
+          <FolderOpen className="w-4 h-4" />
+          Project
         </Link>
         <span>/</span>
         <span className="text-gray-900 font-medium">Sites</span>
@@ -148,7 +149,7 @@ export function SitesList() {
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Sites</h1>
           <p className="mt-1 text-sm text-gray-500">
-            Manage edge locations and infrastructure for this tenant
+            Manage edge locations and infrastructure for this project
           </p>
         </div>
         <Button
@@ -204,7 +205,7 @@ export function SitesList() {
             <Card
               key={site.id}
               className="cursor-pointer hover:shadow-md transition-shadow"
-              onClick={() => navigate(`/tenant/${tenantId}/sites/${site.id}`)}
+              onClick={() => navigate(`/projects/${projectId}/sites/${site.id}`)}
             >
               <div className="p-6">
                 {/* Header */}
@@ -283,7 +284,7 @@ export function SitesList() {
           resetForm();
         }}
         title="Create New Site"
-        description="Add a new edge location to your tenant"
+        description="Add a new edge location to your project"
         footer={
           <div className="flex justify-end gap-3">
             <Button

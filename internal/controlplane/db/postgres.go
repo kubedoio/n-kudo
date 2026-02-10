@@ -123,6 +123,163 @@ RETURNING id, slug, name, primary_region, data_retention_days, created_at, updat
 	return out, nil
 }
 
+func (r *PostgresRepo) ListTenants(ctx context.Context) ([]Tenant, error) {
+	rows, err := r.db.QueryContext(ctx, `
+SELECT id, slug, name, primary_region, data_retention_days, created_at, updated_at
+FROM tenants
+ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var tenants []Tenant
+	for rows.Next() {
+		var t Tenant
+		if err := rows.Scan(&t.ID, &t.Slug, &t.Name, &t.PrimaryRegion, &t.RetentionDays, &t.CreatedAt, &t.UpdatedAt); err != nil {
+			return nil, err
+		}
+		tenants = append(tenants, t)
+	}
+	return tenants, rows.Err()
+}
+
+func (r *PostgresRepo) GetTenantByID(ctx context.Context, tenantID string) (Tenant, error) {
+	row := r.db.QueryRowContext(ctx, `
+SELECT id, slug, name, primary_region, data_retention_days, created_at, updated_at
+FROM tenants
+WHERE id = $1`, tenantID)
+	var out Tenant
+	if err := row.Scan(&out.ID, &out.Slug, &out.Name, &out.PrimaryRegion, &out.RetentionDays, &out.CreatedAt, &out.UpdatedAt); err != nil {
+		if err == sql.ErrNoRows {
+			return Tenant{}, ErrNotFound
+		}
+		return Tenant{}, err
+	}
+	return out, nil
+}
+
+func (r *PostgresRepo) CreateUser(ctx context.Context, user User) (User, error) {
+	row := r.db.QueryRowContext(ctx, `
+INSERT INTO users (id, tenant_id, email, display_name, role, password_hash, is_active, email_verified)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+RETURNING id, tenant_id, email, display_name, role, is_active, email_verified, last_login_at, password_changed_at, created_at, updated_at`,
+		user.ID, user.TenantID, user.Email, user.DisplayName, user.Role, user.PasswordHash, user.IsActive, user.EmailVerified,
+	)
+	var out User
+	if err := row.Scan(&out.ID, &out.TenantID, &out.Email, &out.DisplayName, &out.Role, &out.IsActive, &out.EmailVerified,
+		&out.LastLoginAt, &out.PasswordChangedAt, &out.CreatedAt, &out.UpdatedAt); err != nil {
+		if isUniqueViolation(err) {
+			return User{}, ErrConflict
+		}
+		return User{}, err
+	}
+	return out, nil
+}
+
+func (r *PostgresRepo) GetUserByEmail(ctx context.Context, email string) (User, error) {
+	row := r.db.QueryRowContext(ctx, `
+SELECT id, tenant_id, email, display_name, role, password_hash, is_active, email_verified, last_login_at, password_changed_at, created_at, updated_at
+FROM users
+WHERE email = $1 AND is_active = TRUE`, email)
+	var out User
+	if err := row.Scan(&out.ID, &out.TenantID, &out.Email, &out.DisplayName, &out.Role, &out.PasswordHash, &out.IsActive, &out.EmailVerified,
+		&out.LastLoginAt, &out.PasswordChangedAt, &out.CreatedAt, &out.UpdatedAt); err != nil {
+		if err == sql.ErrNoRows {
+			return User{}, ErrNotFound
+		}
+		return User{}, err
+	}
+	return out, nil
+}
+
+func (r *PostgresRepo) GetUserByEmailAndTenant(ctx context.Context, email, tenantID string) (User, error) {
+	row := r.db.QueryRowContext(ctx, `
+SELECT id, tenant_id, email, display_name, role, password_hash, is_active, email_verified, last_login_at, password_changed_at, created_at, updated_at
+FROM users
+WHERE email = $1 AND tenant_id = $2 AND is_active = TRUE`, email, tenantID)
+	var out User
+	if err := row.Scan(&out.ID, &out.TenantID, &out.Email, &out.DisplayName, &out.Role, &out.PasswordHash, &out.IsActive, &out.EmailVerified,
+		&out.LastLoginAt, &out.PasswordChangedAt, &out.CreatedAt, &out.UpdatedAt); err != nil {
+		if err == sql.ErrNoRows {
+			return User{}, ErrNotFound
+		}
+		return User{}, err
+	}
+	return out, nil
+}
+
+func (r *PostgresRepo) GetUserByID(ctx context.Context, tenantID, userID string) (User, error) {
+	row := r.db.QueryRowContext(ctx, `
+SELECT id, tenant_id, email, display_name, role, password_hash, is_active, email_verified, last_login_at, password_changed_at, created_at, updated_at
+FROM users
+WHERE id = $1 AND tenant_id = $2`, userID, tenantID)
+	var out User
+	if err := row.Scan(&out.ID, &out.TenantID, &out.Email, &out.DisplayName, &out.Role, &out.PasswordHash, &out.IsActive, &out.EmailVerified,
+		&out.LastLoginAt, &out.PasswordChangedAt, &out.CreatedAt, &out.UpdatedAt); err != nil {
+		if err == sql.ErrNoRows {
+			return User{}, ErrNotFound
+		}
+		return User{}, err
+	}
+	return out, nil
+}
+
+func (r *PostgresRepo) UpdateUserLastLogin(ctx context.Context, tenantID, userID string) error {
+	_, err := r.db.ExecContext(ctx, `
+UPDATE users SET last_login_at = now(), updated_at = now()
+WHERE id = $1 AND tenant_id = $2`, userID, tenantID)
+	return err
+}
+
+func (r *PostgresRepo) UpdateUserPassword(ctx context.Context, tenantID, userID, passwordHash string) error {
+	_, err := r.db.ExecContext(ctx, `
+UPDATE users SET password_hash = $1, password_changed_at = now(), updated_at = now()
+WHERE id = $2 AND tenant_id = $3`, passwordHash, userID, tenantID)
+	return err
+}
+
+func (r *PostgresRepo) EmailExists(ctx context.Context, email string) (bool, error) {
+	var exists bool
+	err := r.db.QueryRowContext(ctx, `
+SELECT EXISTS(SELECT 1 FROM users WHERE email = $1)`, email).Scan(&exists)
+	return exists, err
+}
+
+func (r *PostgresRepo) CreateEmailVerificationToken(ctx context.Context, userID, tenantID, tokenHash string, expiresAt time.Time) error {
+	_, err := r.db.ExecContext(ctx, `
+INSERT INTO email_verification_tokens (user_id, tenant_id, token_hash, expires_at)
+VALUES ($1, $2, $3, $4)`, userID, tenantID, tokenHash, expiresAt)
+	return err
+}
+
+func (r *PostgresRepo) VerifyEmailToken(ctx context.Context, tokenHash string) (userID, tenantID string, err error) {
+	var uid, tid string
+	row := r.db.QueryRowContext(ctx, `
+SELECT user_id, tenant_id FROM email_verification_tokens
+WHERE token_hash = $1 AND expires_at > now() AND used_at IS NULL`, tokenHash)
+	if err := row.Scan(&uid, &tid); err != nil {
+		if err == sql.ErrNoRows {
+			return "", "", ErrNotFound
+		}
+		return "", "", err
+	}
+	
+	// Mark token as used
+	_, err = r.db.ExecContext(ctx, `
+UPDATE email_verification_tokens SET used_at = now()
+WHERE token_hash = $1`, tokenHash)
+	
+	return uid, tid, err
+}
+
+func (r *PostgresRepo) MarkEmailVerified(ctx context.Context, tenantID, userID string) error {
+	_, err := r.db.ExecContext(ctx, `
+UPDATE users SET email_verified = TRUE, email_verified_at = now(), updated_at = now()
+WHERE id = $1 AND tenant_id = $2`, userID, tenantID)
+	return err
+}
+
 func (r *PostgresRepo) CreateAPIKey(ctx context.Context, key APIKey) (APIKey, error) {
 	row := r.db.QueryRowContext(ctx, `
 INSERT INTO api_keys (id, tenant_id, name, key_hash, expires_at)
@@ -1704,4 +1861,375 @@ func (r *PostgresRepo) SetTenantLimits(ctx context.Context, tenantID string, lim
 	defer tenantLimitsCacheMu.Unlock()
 	tenantLimitsCache[tenantID] = limits
 	return nil
+}
+
+// ============================================
+// Team Invitation Methods
+// ============================================
+
+func (r *PostgresRepo) CreateInvitation(ctx context.Context, invitation ProjectInvitation) error {
+	_, err := r.db.ExecContext(ctx, `
+INSERT INTO project_invitations (id, tenant_id, email, role, invited_by_user_id, token_hash, status, expires_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+		invitation.ID, invitation.TenantID, invitation.Email, invitation.Role,
+		invitation.InvitedByUserID, invitation.TokenHash, invitation.Status, invitation.ExpiresAt)
+	return err
+}
+
+func (r *PostgresRepo) GetInvitationByToken(ctx context.Context, tokenHash string) (*ProjectInvitation, error) {
+	row := r.db.QueryRowContext(ctx, `
+SELECT id, tenant_id, email, role, invited_by_user_id, status, expires_at, accepted_at, declined_at, cancelled_at, created_at, updated_at
+FROM project_invitations
+WHERE token_hash = $1`, tokenHash)
+	
+	var inv ProjectInvitation
+	if err := row.Scan(&inv.ID, &inv.TenantID, &inv.Email, &inv.Role, &inv.InvitedByUserID,
+		&inv.Status, &inv.ExpiresAt, &inv.AcceptedAt, &inv.DeclinedAt, &inv.CancelledAt, &inv.CreatedAt, &inv.UpdatedAt); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	return &inv, nil
+}
+
+func (r *PostgresRepo) ListPendingInvitations(ctx context.Context, tenantID string) ([]ProjectInvitation, error) {
+	rows, err := r.db.QueryContext(ctx, `
+SELECT i.id, i.tenant_id, i.email, i.role, i.invited_by_user_id, i.status, i.expires_at, i.created_at, u.display_name as invited_by_name
+FROM project_invitations i
+JOIN users u ON u.id = i.invited_by_user_id AND u.tenant_id = i.tenant_id
+WHERE i.tenant_id = $1 AND i.status = 'PENDING' AND i.expires_at > now()
+ORDER BY i.created_at DESC`, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var invitations []ProjectInvitation
+	for rows.Next() {
+		var inv ProjectInvitation
+		var invitedByName string
+		if err := rows.Scan(&inv.ID, &inv.TenantID, &inv.Email, &inv.Role, &inv.InvitedByUserID,
+			&inv.Status, &inv.ExpiresAt, &inv.CreatedAt, &invitedByName); err != nil {
+			return nil, err
+		}
+		invitations = append(invitations, inv)
+	}
+	return invitations, rows.Err()
+}
+
+func (r *PostgresRepo) ListUserInvitations(ctx context.Context, email string) ([]ProjectInvitationWithProject, error) {
+	rows, err := r.db.QueryContext(ctx, `
+SELECT i.id, i.tenant_id, i.email, i.role, i.invited_by_user_id, i.status, i.expires_at, i.created_at, t.name, t.slug
+FROM project_invitations i
+JOIN tenants t ON t.id = i.tenant_id
+WHERE i.email = $1 AND i.status = 'PENDING' AND i.expires_at > now()
+ORDER BY i.created_at DESC`, email)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var invitations []ProjectInvitationWithProject
+	for rows.Next() {
+		var inv ProjectInvitationWithProject
+		if err := rows.Scan(&inv.ID, &inv.TenantID, &inv.Email, &inv.Role, &inv.InvitedByUserID,
+			&inv.Status, &inv.ExpiresAt, &inv.CreatedAt, &inv.ProjectName, &inv.ProjectSlug); err != nil {
+			return nil, err
+		}
+		invitations = append(invitations, inv)
+	}
+	return invitations, rows.Err()
+}
+
+func (r *PostgresRepo) AcceptInvitation(ctx context.Context, invitationID, userID string) error {
+	_, err := r.db.ExecContext(ctx, `
+UPDATE project_invitations 
+SET status = 'ACCEPTED', accepted_at = now(), updated_at = now()
+WHERE id = $1 AND status = 'PENDING' AND expires_at > now()`, invitationID)
+	return err
+}
+
+func (r *PostgresRepo) DeclineInvitation(ctx context.Context, invitationID string) error {
+	_, err := r.db.ExecContext(ctx, `
+UPDATE project_invitations 
+SET status = 'DECLINED', declined_at = now(), updated_at = now()
+WHERE id = $1 AND status = 'PENDING'`, invitationID)
+	return err
+}
+
+func (r *PostgresRepo) CancelInvitation(ctx context.Context, tenantID, invitationID string) error {
+	_, err := r.db.ExecContext(ctx, `
+UPDATE project_invitations 
+SET status = 'CANCELLED', cancelled_at = now(), updated_at = now()
+WHERE id = $1 AND tenant_id = $2 AND status = 'PENDING'`, invitationID, tenantID)
+	return err
+}
+
+func (r *PostgresRepo) GetInvitationByID(ctx context.Context, tenantID, invitationID string) (*ProjectInvitation, error) {
+	row := r.db.QueryRowContext(ctx, `
+SELECT id, tenant_id, email, role, invited_by_user_id, status, expires_at, accepted_at, declined_at, cancelled_at, created_at, updated_at
+FROM project_invitations
+WHERE id = $1 AND tenant_id = $2`, invitationID, tenantID)
+	
+	var inv ProjectInvitation
+	if err := row.Scan(&inv.ID, &inv.TenantID, &inv.Email, &inv.Role, &inv.InvitedByUserID,
+		&inv.Status, &inv.ExpiresAt, &inv.AcceptedAt, &inv.DeclinedAt, &inv.CancelledAt, &inv.CreatedAt, &inv.UpdatedAt); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	return &inv, nil
+}
+
+
+// VXLAN Network Methods
+
+func (r *PostgresRepo) CreateVXLANNetwork(ctx context.Context, tenantID, siteID string, network VXLANNetwork) (VXLANNetwork, error) {
+	row := r.db.QueryRowContext(ctx, `
+INSERT INTO vxlan_networks (id, tenant_id, site_id, name, vni, cidr, gateway, mtu)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+RETURNING id, tenant_id, site_id, name, vni, cidr, gateway, mtu, created_at, updated_at`,
+		network.ID, tenantID, siteID, network.Name, network.VNI, network.CIDR, network.Gateway, network.MTU,
+	)
+	var out VXLANNetwork
+	if err := row.Scan(&out.ID, &out.TenantID, &out.SiteID, &out.Name, &out.VNI, &out.CIDR, &out.Gateway, &out.MTU, &out.CreatedAt, &out.UpdatedAt); err != nil {
+		if isUniqueViolation(err) {
+			return VXLANNetwork{}, ErrConflict
+		}
+		return VXLANNetwork{}, err
+	}
+	return out, nil
+}
+
+func (r *PostgresRepo) ListVXLANNetworks(ctx context.Context, tenantID, siteID string) ([]VXLANNetwork, error) {
+	rows, err := r.db.QueryContext(ctx, `
+SELECT id, tenant_id, site_id, name, vni, cidr, gateway, mtu, created_at, updated_at
+FROM vxlan_networks
+WHERE tenant_id = $1 AND site_id = $2
+ORDER BY created_at DESC`, tenantID, siteID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var networks []VXLANNetwork
+	for rows.Next() {
+		var n VXLANNetwork
+		if err := rows.Scan(&n.ID, &n.TenantID, &n.SiteID, &n.Name, &n.VNI, &n.CIDR, &n.Gateway, &n.MTU, &n.CreatedAt, &n.UpdatedAt); err != nil {
+			return nil, err
+		}
+		networks = append(networks, n)
+	}
+	return networks, rows.Err()
+}
+
+func (r *PostgresRepo) GetVXLANNetwork(ctx context.Context, tenantID, networkID string) (VXLANNetwork, error) {
+	row := r.db.QueryRowContext(ctx, `
+SELECT id, tenant_id, site_id, name, vni, cidr, gateway, mtu, created_at, updated_at
+FROM vxlan_networks
+WHERE id = $1 AND tenant_id = $2`, networkID, tenantID)
+	var out VXLANNetwork
+	if err := row.Scan(&out.ID, &out.TenantID, &out.SiteID, &out.Name, &out.VNI, &out.CIDR, &out.Gateway, &out.MTU, &out.CreatedAt, &out.UpdatedAt); err != nil {
+		if err == sql.ErrNoRows {
+			return VXLANNetwork{}, ErrNotFound
+		}
+		return VXLANNetwork{}, err
+	}
+	return out, nil
+}
+
+func (r *PostgresRepo) GetVXLANNetworkByVNI(ctx context.Context, tenantID string, vni int) (VXLANNetwork, error) {
+	row := r.db.QueryRowContext(ctx, `
+SELECT id, tenant_id, site_id, name, vni, cidr, gateway, mtu, created_at, updated_at
+FROM vxlan_networks
+WHERE vni = $1 AND tenant_id = $2`, vni, tenantID)
+	var out VXLANNetwork
+	if err := row.Scan(&out.ID, &out.TenantID, &out.SiteID, &out.Name, &out.VNI, &out.CIDR, &out.Gateway, &out.MTU, &out.CreatedAt, &out.UpdatedAt); err != nil {
+		if err == sql.ErrNoRows {
+			return VXLANNetwork{}, ErrNotFound
+		}
+		return VXLANNetwork{}, err
+	}
+	return out, nil
+}
+
+func (r *PostgresRepo) DeleteVXLANNetwork(ctx context.Context, tenantID, networkID string) error {
+	result, err := r.db.ExecContext(ctx, `
+DELETE FROM vxlan_networks
+WHERE id = $1 AND tenant_id = $2`, networkID, tenantID)
+	if err != nil {
+		return err
+	}
+	rowsAffected, _ := result.RowsAffected()
+	if rowsAffected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (r *PostgresRepo) VXLANNetworkBelongsToTenant(ctx context.Context, networkID, tenantID string) (bool, error) {
+	row := r.db.QueryRowContext(ctx, `
+SELECT 1 FROM vxlan_networks WHERE id = $1 AND tenant_id = $2`, networkID, tenantID)
+	var one int
+	if err := row.Scan(&one); err != nil {
+		if err == sql.ErrNoRows {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+// VXLAN Tunnel Methods
+
+func (r *PostgresRepo) CreateVXLANTunnel(ctx context.Context, tunnel VXLANTunnel) (VXLANTunnel, error) {
+	row := r.db.QueryRowContext(ctx, `
+INSERT INTO vxlan_tunnels (id, network_id, host_id, local_ip, vtep_name, status)
+VALUES ($1, $2, $3, $4, $5, $6)
+RETURNING id, network_id, host_id, local_ip, vtep_name, status, created_at, updated_at`,
+		tunnel.ID, tunnel.NetworkID, tunnel.HostID, tunnel.LocalIP, tunnel.VTEPName, tunnel.Status,
+	)
+	var out VXLANTunnel
+	if err := row.Scan(&out.ID, &out.NetworkID, &out.HostID, &out.LocalIP, &out.VTEPName, &out.Status, &out.CreatedAt, &out.UpdatedAt); err != nil {
+		if isUniqueViolation(err) {
+			return VXLANTunnel{}, ErrConflict
+		}
+		return VXLANTunnel{}, err
+	}
+	return out, nil
+}
+
+func (r *PostgresRepo) ListVXLANTunnels(ctx context.Context, networkID string) ([]VXLANTunnel, error) {
+	rows, err := r.db.QueryContext(ctx, `
+SELECT t.id, t.network_id, t.host_id, t.local_ip, t.vtep_name, t.status, t.created_at, t.updated_at
+FROM vxlan_tunnels t
+WHERE t.network_id = $1
+ORDER BY t.created_at DESC`, networkID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var tunnels []VXLANTunnel
+	for rows.Next() {
+		var t VXLANTunnel
+		if err := rows.Scan(&t.ID, &t.NetworkID, &t.HostID, &t.LocalIP, &t.VTEPName, &t.Status, &t.CreatedAt, &t.UpdatedAt); err != nil {
+			return nil, err
+		}
+		tunnels = append(tunnels, t)
+	}
+	return tunnels, rows.Err()
+}
+
+func (r *PostgresRepo) GetVXLANTunnel(ctx context.Context, networkID, hostID string) (VXLANTunnel, error) {
+	row := r.db.QueryRowContext(ctx, `
+SELECT id, network_id, host_id, local_ip, vtep_name, status, created_at, updated_at
+FROM vxlan_tunnels
+WHERE network_id = $1 AND host_id = $2`, networkID, hostID)
+	var out VXLANTunnel
+	if err := row.Scan(&out.ID, &out.NetworkID, &out.HostID, &out.LocalIP, &out.VTEPName, &out.Status, &out.CreatedAt, &out.UpdatedAt); err != nil {
+		if err == sql.ErrNoRows {
+			return VXLANTunnel{}, ErrNotFound
+		}
+		return VXLANTunnel{}, err
+	}
+	return out, nil
+}
+
+func (r *PostgresRepo) UpdateVXLANTunnelStatus(ctx context.Context, tunnelID string, status string) error {
+	_, err := r.db.ExecContext(ctx, `
+UPDATE vxlan_tunnels SET status = $1, updated_at = now()
+WHERE id = $2`, status, tunnelID)
+	return err
+}
+
+func (r *PostgresRepo) DeleteVXLANTunnel(ctx context.Context, tunnelID string) error {
+	result, err := r.db.ExecContext(ctx, `DELETE FROM vxlan_tunnels WHERE id = $1`, tunnelID)
+	if err != nil {
+		return err
+	}
+	rowsAffected, _ := result.RowsAffected()
+	if rowsAffected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// VM Network Attachment Methods
+
+func (r *PostgresRepo) AttachVMToNetwork(ctx context.Context, attachment VMNetworkAttachment) (VMNetworkAttachment, error) {
+	row := r.db.QueryRowContext(ctx, `
+INSERT INTO vm_network_attachments (id, vm_id, network_id, ip_address, mac_address)
+VALUES ($1, $2, $3, $4, $5)
+RETURNING id, vm_id, network_id, ip_address, mac_address, created_at`,
+		attachment.ID, attachment.VMID, attachment.NetworkID, attachment.IPAddress, attachment.MACAddress,
+	)
+	var out VMNetworkAttachment
+	if err := row.Scan(&out.ID, &out.VMID, &out.NetworkID, &out.IPAddress, &out.MACAddress, &out.CreatedAt); err != nil {
+		if isUniqueViolation(err) {
+			return VMNetworkAttachment{}, ErrConflict
+		}
+		return VMNetworkAttachment{}, err
+	}
+	return out, nil
+}
+
+func (r *PostgresRepo) DetachVMFromNetwork(ctx context.Context, vmID, networkID string) error {
+	result, err := r.db.ExecContext(ctx, `
+DELETE FROM vm_network_attachments
+WHERE vm_id = $1 AND network_id = $2`, vmID, networkID)
+	if err != nil {
+		return err
+	}
+	rowsAffected, _ := result.RowsAffected()
+	if rowsAffected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (r *PostgresRepo) ListVMNetworkAttachments(ctx context.Context, vmID string) ([]VMNetworkAttachment, error) {
+	rows, err := r.db.QueryContext(ctx, `
+SELECT a.id, a.vm_id, a.network_id, a.ip_address, a.mac_address, a.created_at
+FROM vm_network_attachments a
+WHERE a.vm_id = $1
+ORDER BY a.created_at DESC`, vmID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var attachments []VMNetworkAttachment
+	for rows.Next() {
+		var a VMNetworkAttachment
+		if err := rows.Scan(&a.ID, &a.VMID, &a.NetworkID, &a.IPAddress, &a.MACAddress, &a.CreatedAt); err != nil {
+			return nil, err
+		}
+		attachments = append(attachments, a)
+	}
+	return attachments, rows.Err()
+}
+
+func (r *PostgresRepo) ListNetworkVMAttachments(ctx context.Context, networkID string) ([]VMNetworkAttachment, error) {
+	rows, err := r.db.QueryContext(ctx, `
+SELECT a.id, a.vm_id, a.network_id, a.ip_address, a.mac_address, a.created_at
+FROM vm_network_attachments a
+WHERE a.network_id = $1
+ORDER BY a.created_at DESC`, networkID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var attachments []VMNetworkAttachment
+	for rows.Next() {
+		var a VMNetworkAttachment
+		if err := rows.Scan(&a.ID, &a.VMID, &a.NetworkID, &a.IPAddress, &a.MACAddress, &a.CreatedAt); err != nil {
+			return nil, err
+		}
+		attachments = append(attachments, a)
+	}
+	return attachments, rows.Err()
 }

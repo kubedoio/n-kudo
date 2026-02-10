@@ -13,8 +13,16 @@ import (
 	"github.com/kubedoio/n-kudo/internal/edge/state"
 )
 
+// StateStore defines the interface for state storage operations used by Executor
+type StateStore interface {
+	GetMicroVM(vmID string) (state.MicroVM, bool, error)
+	UpsertMicroVM(vm state.MicroVM) error
+	GetActionRecord(actionID string) (state.ActionRecord, bool, error)
+	PutActionRecord(record state.ActionRecord) error
+}
+
 type Executor struct {
-	Store    *state.Store
+	Store    StateStore
 	Provider MicroVMProvider
 	Logs     LogSink
 }

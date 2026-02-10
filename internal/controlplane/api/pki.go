@@ -91,6 +91,15 @@ func (c *InternalCA) Key() *rsa.PrivateKey {
 	return c.key
 }
 
+// CertPool returns a new cert pool containing the CA certificate
+func (c *InternalCA) CertPool() *x509.CertPool {
+	pool := x509.NewCertPool()
+	if ok := pool.AppendCertsFromPEM(c.certPEM); !ok {
+		return nil
+	}
+	return pool
+}
+
 func (c *InternalCA) SignAgentCSR(csrPEM []byte, agentID, tenantID, siteID string, ttl time.Duration) (certPEM []byte, serial string, err error) {
 	_ = tenantID
 	_ = siteID

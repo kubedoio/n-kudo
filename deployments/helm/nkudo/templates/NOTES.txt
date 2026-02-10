@@ -1,0 +1,214 @@
+{{- $fullName := include "nkudo.fullname" . -}}
+{{- $httpPort := .Values.service.httpPort -}}
+{{- $grpcPort := .Values.service.grpcPort -}}
+
+CHART NAME: {{ .Chart.Name }}
+CHART VERSION: {{ .Chart.Version }}
+APP VERSION: {{ .Chart.AppVersion }}
+
+** Please be patient while the chart is being deployed **
+
+{{- if .Release.IsInstall }}
+
+Thank you for installing {{ .Chart.Name }}!
+
+Your release is named {{ .Release.Name }}.
+
+To learn more about the release, try:
+
+  $ helm status {{ .Release.Name }}
+  $ helm get values {{ .Release.Name }}
+  $ kubectl get pods -n {{ .Release.Namespace }} -l app.kubernetes.io/name={{ include "nkudo.name" . }},app.kubernetes.io/instance={{ .Release.Name }}
+
+{{- else }}
+
+Your release {{ .Release.Name }} has been upgraded to version {{ .Chart.Version }}.
+
+{{- end }}
+
+=== Connection Information ===
+
+{{- if .Values.ingress.enabled }}
+
+The control plane is exposed via Ingress:
+
+{{- range .Values.ingress.hosts }}
+  HTTP API: http{{ if $.Values.ingress.tls.enabled }}s{{ end }}://{{ .host }}
+{{- end }}
+
+{{- if .Values.ingress.grpc.enabled }}
+  {{- range .Values.ingress.grpc.hosts }}
+  gRPC API: http{{ if $.Values.ingress.tls.enabled }}s{{ end }}://{{ .host }}
+  {{- end }}
+{{- end }}
+
+{{- else if eq .Values.service.type "LoadBalancer" }}
+
+The control plane is exposed via LoadBalancer service:
+
+  export SERVICE_IP=$(kubectl get svc --namespace {{ .Release.Namespace }} {{ $fullName }} -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+  echo "HTTP API: http://${SERVICE_IP}:{{ $httpPort }}"
+  echo "gRPC API: http://${SERVICE_IP}:{{ $grpcPort }}"
+
+{{- else if eq .Values.service.type "NodePort" }}
+
+The control plane is exposed via NodePort service:
+
+  export NODE_PORT_HTTP=$(kubectl get --namespace {{ .Release.Namespace }} -o jsonpath="{.spec.ports[0].nodePort}" services {{ $fullName }})
+  export NODE_PORT_GRPC=$(kubectl get --namespace {{ .Release.Namespace }} -o jsonpath="{.spec.ports[1].nodePort}" services {{ $fullName }})
+  export NODE_IP=$(kubectl get nodes --namespace {{ .Release.Namespace }} -o jsonpath="{.items[0].status.addresses[0].address}")
+  echo "HTTP API: http://${NODE_IP}:${NODE_PORT_HTTP}"
+  echo "gRPC API: http://${NODE_IP}:${NODE_PORT_GRPC}"
+
+{{- else }}
+
+The control plane is running inside the cluster at:
+
+  {{ $fullName }}.{{ .Release.Namespace }}.svc.cluster.local
+
+To access it from outside the cluster, use port-forward:
+
+  # HTTP API
+  kubectl port-forward --namespace {{ .Release.Namespace }} svc/{{ $fullName }} {{ $httpPort }}:{{ $httpPort }}
+
+  # gRPC API
+  kubectl port-forward --namespace {{ .Release.Namespace }} svc/{{ $fullName }} {{ $grpcPort }}:{{ $grpcPort }}
+
+{{- end }}
+
+{{- if .Values.postgresql.enabled }}
+
+=== Database Information ===
+
+PostgreSQL is deployed as part of this release.
+  Database: {{ .Values.postgresql.auth.database }}
+  Username: {{ .Values.postgresql.auth.username }}
+
+To connect to the database:
+
+  kubectl exec -it --namespace {{ .Release.Namespace }} {{ include "nkudo.postgresql.fullname" . }}-0 -- psql -U {{ .Values.postgresql.auth.database }} -d {{ .Values.postgresql.auth.database }}
+
+{{- else }}
+
+=== Database Information ===
+
+Using external PostgreSQL:
+  Host: {{ .Values.database.external.host }}
+  Port: {{ .Values.database.external.port }}
+  Database: {{ .Values.database.external.database }}
+  User: {{ .Values.database.external.user }}
+
+{{- end }}
+
+{{- if .Values.security.mtls.enabled }}
+
+=== Security Information ===
+
+mTLS is enabled for edge communication.
+CA Certificate is stored in secret: {{ include "nkudo.caSecretName" . }}
+
+To retrieve the CA certificate:
+
+  kubectl get secret --namespace {{ .Release.Namespace }} {{ include "nkudo.caSecretName" . }} -o jsonpath='{.data.ca\\.crt}' | base64 -d
+
+{{- end }}
+
+=== Admin Access ===
+
+Admin API key is stored in secret: {{ include "nkudo.securitySecretName" . }}
+
+To retrieve the admin key:
+
+  kubectl get secret --namespace {{ .Release.Namespace }} {{ include "nkudo.securitySecretName" . }} -o jsonpath='{.data.admin-key}' | base64 -d
+
+Example API call:
+
+{{- if .Values.ingress.enabled }}
+  {{- range .Values.ingress.hosts }}
+  curl -H "Authorization: Bearer $(kubectl get secret --namespace {{ $.Release.Namespace }} {{ include "nkudo.securitySecretName" $ }} -o jsonpath='{.data.admin-key}' | base64 -d)" \
+    http{{ if $.Values.ingress.tls.enabled }}s{{ end }}://{{ .host }}/api/v1/status
+  {{- end }}
+{{- else }}
+  # Port-forward first
+  kubectl port-forward --namespace {{ .Release.Namespace }} svc/{{ $fullName }} {{ $httpPort }}:{{ $httpPort }}
+  
+  # Then make API call
+  curl -H "Authorization: Bearer $(kubectl get secret --namespace {{ .Release.Namespace }} {{ include "nkudo.securitySecretName" . }} -o jsonpath='{.data.admin-key}' | base64 -d)" \
+    http://localhost:{{ $httpPort }}/api/v1/status
+{{- end }}
+
+{{- if .Values.monitoring.enabled }}
+
+=== Monitoring Information ===
+
+Prometheus metrics are available at:
+  http://{{ $fullName }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.metricsPort }}/metrics
+
+{{- if .Values.monitoring.serviceMonitor.enabled }}
+
+ServiceMonitor has been created. Prometheus should automatically scrape metrics.
+
+{{- end }}
+
+{{- if .Values.monitoring.grafana.enabled }}
+
+Grafana dashboard is available in ConfigMap: {{ $fullName }}-dashboard
+
+{{- end }}
+{{- end }}
+
+{{- if .Values.backup.enabled }}
+
+=== Backup Information ===
+
+Backup is enabled with schedule: {{ .Values.backup.schedule }}
+Retention: {{ .Values.backup.retention }} backups
+
+{{- if .Values.backup.s3.enabled }}
+Backup destination: s3://{{ .Values.backup.s3.bucket }}/{{ .Values.backup.s3.prefix }}
+{{- end }}
+
+{{- end }}
+
+{{- if .Values.autoscaling.enabled }}
+
+=== Autoscaling Information ===
+
+HorizontalPodAutoscaler is enabled:
+  Min replicas: {{ .Values.autoscaling.minReplicas }}
+  Max replicas: {{ .Values.autoscaling.maxReplicas }}
+  Target CPU: {{ .Values.autoscaling.targetCPUUtilizationPercentage }}%
+  Target Memory: {{ .Values.autoscaling.targetMemoryUtilizationPercentage }}%
+
+{{- end }}
+
+=== Next Steps ===
+
+1. Verify the deployment:
+
+   kubectl get pods -n {{ .Release.Namespace }} -l app.kubernetes.io/name={{ include "nkudo.name" . }}
+
+2. Check the logs:
+
+   kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/name={{ include "nkudo.name" . }} -f
+
+3. Test the API:
+
+{{- if .Values.ingress.enabled }}
+   {{- range .Values.ingress.hosts }}
+   curl http{{ if $.Values.ingress.tls.enabled }}s{{ end }}://{{ .host }}/health
+   {{- end }}
+{{- else }}
+   kubectl port-forward --namespace {{ .Release.Namespace }} svc/{{ $fullName }} {{ $httpPort }}:{{ $httpPort }}
+   curl http://localhost:{{ $httpPort }}/health
+{{- end }}
+
+4. Deploy edge nodes:
+
+   Refer to the documentation for edge node enrollment instructions.
+
+=== Support ===
+
+For more information, please visit:
+  - Documentation: https://github.com/kubedoio/n-kudo/tree/main/docs
+  - Issues: https://github.com/kubedoio/n-kudo/issues

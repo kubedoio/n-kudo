@@ -31,7 +31,7 @@ describe('useCreateAPIKey', () => {
     const onSuccess = vi.fn()
     const { result } = renderHook(
       () => useCreateAPIKey({
-        onSuccess: (data, variables, context) => {
+        onSuccess: (data) => {
           onSuccess(data)
         }
       }),
@@ -56,7 +56,7 @@ describe('useRevokeAPIKey', () => {
     const onSuccess = vi.fn()
     const { result } = renderHook(
       () => useRevokeAPIKey({
-        onSuccess: (data, variables, context) => {
+        onSuccess: (data) => {
           onSuccess(data)
         }
       }),

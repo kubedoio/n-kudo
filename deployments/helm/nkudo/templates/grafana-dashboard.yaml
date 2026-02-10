@@ -1,0 +1,219 @@
+{{- if and .Values.monitoring.enabled .Values.monitoring.grafana.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "nkudo.fullname" . }}-dashboard
+  labels:
+    {{- include "nkudo.labels" . | nindent 4 }}
+    {{ .Values.monitoring.grafana.sidecarLabel }}: {{ .Values.monitoring.grafana.sidecarLabelValue | quote }}
+data:
+  nkudo-dashboard.json: |
+    {
+      "dashboard": {
+        "id": null,
+        "title": "n-kudo Control Plane",
+        "tags": ["nkudo", "control-plane"],
+        "timezone": "browser",
+        "schemaVersion": 36,
+        "version": 1,
+        "refresh": "30s",
+        "panels": [
+          {
+            "id": 1,
+            "title": "Request Rate",
+            "type": "stat",
+            "targets": [
+              {
+                "expr": "sum(rate(nkudo_http_requests_total[5m]))",
+                "legendFormat": "Requests/sec"
+              }
+            ],
+            "gridPos": {"h": 8, "w": 6, "x": 0, "y": 0},
+            "options": {
+              "colorMode": "value"
+            }
+          },
+          {
+            "id": 2,
+            "title": "Error Rate",
+            "type": "stat",
+            "targets": [
+              {
+                "expr": "sum(rate(nkudo_http_requests_total{status=~\"5..\"}[5m])) / sum(rate(nkudo_http_requests_total[5m])) * 100",
+                "legendFormat": "Error %"
+              }
+            ],
+            "gridPos": {"h": 8, "w": 6, "x": 6, "y": 0},
+            "options": {
+              "colorMode": "value",
+              "graphMode": "area"
+            },
+            "fieldConfig": {
+              "defaults": {
+                "unit": "percent",
+                "thresholds": {
+                  "steps": [
+                    {"color": "green", "value": null},
+                    {"color": "yellow", "value": 1},
+                    {"color": "red", "value": 5}
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "id": 3,
+            "title": "P95 Latency",
+            "type": "stat",
+            "targets": [
+              {
+                "expr": "histogram_quantile(0.95, sum(rate(nkudo_http_request_duration_seconds_bucket[5m])) by (le))",
+                "legendFormat": "P95"
+              }
+            ],
+            "gridPos": {"h": 8, "w": 6, "x": 12, "y": 0},
+            "options": {
+              "colorMode": "value"
+            },
+            "fieldConfig": {
+              "defaults": {
+                "unit": "s"
+              }
+            }
+          },
+          {
+            "id": 4,
+            "title": "Active Connections",
+            "type": "stat",
+            "targets": [
+              {
+                "expr": "nkudo_active_connections",
+                "legendFormat": "Connections"
+              }
+            ],
+            "gridPos": {"h": 8, "w": 6, "x": 18, "y": 0}
+          },
+          {
+            "id": 5,
+            "title": "Request Rate by Endpoint",
+            "type": "timeseries",
+            "targets": [
+              {
+                "expr": "sum(rate(nkudo_http_requests_total[5m])) by (path)",
+                "legendFormat": "{{`{{path}}`}}"
+              }
+            ],
+            "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8}
+          },
+          {
+            "id": 6,
+            "title": "Response Time Distribution",
+            "type": "heatmap",
+            "targets": [
+              {
+                "expr": "sum(rate(nkudo_http_request_duration_seconds_bucket[5m])) by (le)",
+                "format": "heatmap"
+              }
+            ],
+            "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+            "options": {
+              "calculate": false,
+              "yAxis": {
+                "unit": "s"
+              }
+            }
+          },
+          {
+            "id": 7,
+            "title": "Edge Nodes",
+            "type": "stat",
+            "targets": [
+              {
+                "expr": "nkudo_edge_nodes_total",
+                "legendFormat": "Total"
+              },
+              {
+                "expr": "nkudo_edge_nodes_connected",
+                "legendFormat": "Connected"
+              }
+            ],
+            "gridPos": {"h": 8, "w": 6, "x": 0, "y": 16}
+          },
+          {
+            "id": 8,
+            "title": "VMs",
+            "type": "stat",
+            "targets": [
+              {
+                "expr": "nkudo_vms_total",
+                "legendFormat": "Total"
+              },
+              {
+                "expr": "nkudo_vms_running",
+                "legendFormat": "Running"
+              }
+            ],
+            "gridPos": {"h": 8, "w": 6, "x": 6, "y": 16}
+          },
+          {
+            "id": 9,
+            "title": "Plans",
+            "type": "stat",
+            "targets": [
+              {
+                "expr": "nkudo_plans_total",
+                "legendFormat": "Total"
+              },
+              {
+                "expr": "nkudo_plans_executing",
+                "legendFormat": "Executing"
+              }
+            ],
+            "gridPos": {"h": 8, "w": 6, "x": 12, "y": 16}
+          },
+          {
+            "id": 10,
+            "title": "CPU Usage",
+            "type": "timeseries",
+            "targets": [
+              {
+                "expr": "rate(container_cpu_usage_seconds_total{pod=~\"nkudo-.*\"}[5m])",
+                "legendFormat": "{{`{{pod}}`}}"
+              }
+            ],
+            "gridPos": {"h": 8, "w": 6, "x": 18, "y": 16}
+          },
+          {
+            "id": 11,
+            "title": "Memory Usage",
+            "type": "timeseries",
+            "targets": [
+              {
+                "expr": "container_memory_usage_bytes{pod=~\"nkudo-.*\"}",
+                "legendFormat": "{{`{{pod}}`}}"
+              }
+            ],
+            "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24},
+            "fieldConfig": {
+              "defaults": {
+                "unit": "bytes"
+              }
+            }
+          },
+          {
+            "id": 12,
+            "title": "Goroutines",
+            "type": "timeseries",
+            "targets": [
+              {
+                "expr": "go_goroutines{job=~\".*nkudo.*\"}",
+                "legendFormat": "{{`{{pod}}`}}"
+              }
+            ],
+            "gridPos": {"h": 8, "w": 12, "x": 12, "y": 24}
+          }
+        ]
+      },
+      "overwrite": true
+    }
+{{- end }}

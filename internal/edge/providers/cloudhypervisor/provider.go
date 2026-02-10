@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/kubedoio/n-kudo/internal/edge/executor"
+	"github.com/kubedoio/n-kudo/internal/edge/network"
 	"github.com/kubedoio/n-kudo/internal/edge/state"
 )
 
@@ -39,9 +40,15 @@ const (
 	commandsFileName = "commands.log"
 )
 
+// StateStore defines the interface for state storage operations used by Provider
+type StateStore interface {
+	UpsertMicroVM(vm state.MicroVM) error
+	DeleteMicroVM(vmID string) error
+}
+
 type Provider struct {
 	Binary            string
-	State             *state.Store
+	State             StateStore
 	RuntimeDir        string
 	ImagesDir         string
 	IPBinary          string
@@ -228,7 +235,7 @@ func (p *Provider) DeleteVM(ctx context.Context, vmID string) error {
 	}
 
 	_ = p.StopVM(ctx, vmID)
-	_ = p.cleanupTap(ctx, vmID, meta.Spec.TapName)
+	_ = p.cleanupNetworks(ctx, vmID, meta.Spec.GetNetworks())
 
 	if err := os.RemoveAll(p.vmDir(vmID)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("remove vm dir: %w", err)
@@ -292,9 +299,28 @@ func (p *Provider) Create(ctx context.Context, params executor.MicroVMParams) er
 		VCPU:       firstPositive(params.VCPU, 1),
 		MemMB:      firstPositive(params.MemoryMiB, 256),
 		DiskPath:   params.RootfsPath,
-		TapName:    firstNonEmpty(params.TapIface, defaultTapName(params.VMID)),
+		TapName:    params.TapIface,
 		BridgeName: firstNonEmpty(p.DefaultBridgeName, "br0"),
 	}
+
+	// Convert executor network interfaces to provider network interfaces
+	networks := params.GetNetworks()
+	if len(networks) > 0 {
+		spec.Networks = make([]NetworkInterface, len(networks))
+		for i, net := range networks {
+			spec.Networks[i] = NetworkInterface{
+				ID:      firstNonEmpty(net.ID, fmt.Sprintf("eth%d", i)),
+				TapName: firstNonEmpty(net.TapName, defaultTapName(fmt.Sprintf("%s-%d", params.VMID, i))),
+				MacAddr: net.MacAddr,
+				Bridge:  firstNonEmpty(net.Bridge, p.DefaultBridgeName, "br0"),
+				IPAddr:  net.IPConfig.Address,
+			}
+		}
+	} else {
+		// Backward compatibility: create default network from TapIface
+		spec.TapName = firstNonEmpty(params.TapIface, defaultTapName(params.VMID))
+	}
+
 	_, err := p.createVM(ctx, spec, params.VMID)
 	return err
 }
@@ -324,7 +350,7 @@ func (p *Provider) GetProcessID(ctx context.Context, vmID string) (int, error) {
 }
 
 func (p *Provider) BuildCreateParamsFromVM(vm state.MicroVM) executor.MicroVMParams {
-	return executor.MicroVMParams{
+	params := executor.MicroVMParams{
 		VMID:       vm.ID,
 		Name:       vm.Name,
 		RootfsPath: vm.RootfsPath,
@@ -332,6 +358,30 @@ func (p *Provider) BuildCreateParamsFromVM(vm state.MicroVM) executor.MicroVMPar
 		VCPU:       1,
 		MemoryMiB:  256,
 	}
+
+	// Convert stored network configs to executor network interfaces
+	networks := vm.GetNetworks()
+	if len(networks) > 0 {
+		params.Networks = make([]executor.NetworkInterface, len(networks))
+		for i, net := range networks {
+			var ipConfig *executor.IPConfig
+			if net.IPAddr != "" {
+				// Parse CIDR to get address (gateway not stored separately)
+				ipConfig = &executor.IPConfig{
+					Address: net.IPAddr,
+				}
+			}
+			params.Networks[i] = executor.NetworkInterface{
+				ID:       net.ID,
+				TapName:  net.TapName,
+				MacAddr:  net.MacAddr,
+				Bridge:   net.Bridge,
+				IPConfig: ipConfig,
+			}
+		}
+	}
+
+	return params
 }
 
 func (p *Provider) PIDString(vmID string) string {
@@ -368,13 +418,13 @@ func (p *Provider) createVM(ctx context.Context, spec VMSpec, requestedID string
 		return vmID, nil
 	}
 
-	tapCreated := false
+	networksCreated := false
 	defer func() {
 		if err == nil {
 			return
 		}
-		if tapCreated {
-			_ = p.cleanupTap(context.Background(), vmID, spec.TapName)
+		if networksCreated {
+			_ = p.cleanupNetworks(context.Background(), vmID, spec.GetNetworks())
 		}
 		_ = os.RemoveAll(vmDir)
 	}()
@@ -389,10 +439,11 @@ func (p *Provider) createVM(ctx context.Context, spec VMSpec, requestedID string
 		return "", err
 	}
 
-	if err := p.setupTap(ctx, vmID, spec.TapName, spec.BridgeName); err != nil {
+	// Setup all network interfaces
+	if err := p.setupNetworks(ctx, vmID, spec.GetNetworks()); err != nil {
 		return "", err
 	}
-	tapCreated = true
+	networksCreated = true
 
 	meta := vmMeta{
 		VMID:             vmID,
@@ -560,6 +611,64 @@ func (p *Provider) prepareCloudInitISO(ctx context.Context, vmID, vmDir string, 
 	return isoPath, nil
 }
 
+func (p *Provider) setupNetworks(ctx context.Context, vmID string, networks []NetworkInterface) error {
+	for i, net := range networks {
+		// Generate TAP name if not provided
+		tapName := net.TapName
+		if tapName == "" {
+			tapName = network.GenerateTAPName(vmID, i)
+		}
+
+		// Generate MAC if not provided
+		macAddr := net.MacAddr
+		if macAddr == "" {
+			macAddr = network.GenerateMAC(vmID, i)
+		}
+
+		// Use default bridge if not specified
+		bridge := net.Bridge
+		if bridge == "" {
+			bridge = p.DefaultBridgeName
+		}
+
+		if err := p.setupTap(ctx, vmID, tapName, bridge); err != nil {
+			return fmt.Errorf("setup network %s: %w", net.ID, err)
+		}
+
+		// Configure IP if specified
+		if net.IPAddr != "" {
+			ipConfig := network.IPConfig{
+				Address: net.IPAddr,
+			}
+			if err := network.ConfigureInterface(tapName, ipConfig); err != nil {
+				return fmt.Errorf("configure IP for network %s: %w", net.ID, err)
+			}
+		}
+
+		// Update the network with generated values
+		networks[i].TapName = tapName
+		networks[i].MacAddr = macAddr
+		networks[i].Bridge = bridge
+	}
+	return nil
+}
+
+func (p *Provider) cleanupNetworks(ctx context.Context, vmID string, networks []NetworkInterface) error {
+	var errs []string
+	for _, net := range networks {
+		if net.TapName == "" {
+			continue
+		}
+		if err := p.cleanupTap(ctx, vmID, net.TapName); err != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v", net.ID, err))
+		}
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("cleanup networks: %s", strings.Join(errs, "; "))
+	}
+	return nil
+}
+
 func (p *Provider) setupTap(ctx context.Context, vmID, tapName, bridgeName string) error {
 	cmds := renderTapSetupCommands(p.IPBinary, tapName, bridgeName)
 	for _, cmd := range cmds {
@@ -610,11 +719,23 @@ func (p *Provider) renderCHArgs(meta vmMeta) []string {
 		"--serial", fmt.Sprintf("file=%s", meta.ConsolePath),
 		"--console", "off",
 	}
-	netCfg := fmt.Sprintf("tap=%s", meta.Spec.TapName)
-	if meta.Spec.MACAddress != "" {
-		netCfg = netCfg + ",mac=" + meta.Spec.MACAddress
+
+	// Add network interfaces
+	networks := meta.Spec.GetNetworks()
+	for _, net := range networks {
+		netCfg := fmt.Sprintf("tap=%s", net.TapName)
+		if net.MacAddr != "" {
+			netCfg = netCfg + ",mac=" + net.MacAddr
+		}
+		if net.IPAddr != "" {
+			netCfg = netCfg + ",ip=" + net.IPAddr
+		}
+		if net.Bridge != "" {
+			netCfg = netCfg + ",bridge=" + net.Bridge
+		}
+		args = append(args, "--net", netCfg)
 	}
-	args = append(args, "--net", netCfg)
+
 	return args
 }
 
@@ -678,11 +799,26 @@ func (p *Provider) syncStateStore(meta vmMeta) error {
 	if p.State == nil {
 		return nil
 	}
+
+	// Convert network interfaces to state network configs
+	networks := meta.Spec.GetNetworks()
+	networkConfigs := make([]state.NetworkConfig, len(networks))
+	for i, net := range networks {
+		networkConfigs[i] = state.NetworkConfig{
+			ID:      net.ID,
+			TapName: net.TapName,
+			MacAddr: net.MacAddr,
+			IPAddr:  net.IPAddr,
+			Bridge:  net.Bridge,
+		}
+	}
+
 	return p.State.UpsertMicroVM(state.MicroVM{
 		ID:         meta.VMID,
 		Name:       meta.Spec.Name,
 		RootfsPath: meta.DiskPath,
 		TapIface:   meta.Spec.TapName,
+		Networks:   networkConfigs,
 		CHPID:      meta.PID,
 		Status:     strings.ToUpper(string(meta.Status)),
 	})

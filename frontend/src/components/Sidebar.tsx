@@ -1,10 +1,9 @@
 import { NavLink, useParams } from 'react-router-dom'
 import {
-  Building2,
+  FolderOpen,
+  Layout,
   Server,
   Settings,
-  Users,
-  Network,
   Shield,
 } from 'lucide-react'
 import { useAppStore } from '../store/appStore'
@@ -12,18 +11,17 @@ import { cn } from '../lib/utils'
 
 export function Sidebar() {
   const { sidebarOpen } = useAppStore()
-  const { tenantId } = useParams()
+  const { projectId } = useParams()
 
   const navItems = [
-    { path: '/admin/tenants', label: 'Tenants', icon: Building2, admin: true },
+    { path: '/projects', label: 'Projects', icon: FolderOpen },
   ]
 
-  const tenantNavItems = tenantId
+  const projectNavItems = projectId
     ? [
-        { path: `/tenant/${tenantId}/sites`, label: 'Sites', icon: Server },
-        { path: `/tenant/${tenantId}/networks`, label: 'Networks', icon: Network },
-        { path: `/tenant/${tenantId}/users`, label: 'Users', icon: Users },
-        { path: `/tenant/${tenantId}/settings`, label: 'Settings', icon: Settings },
+        { path: `/projects/${projectId}`, label: 'Overview', icon: Layout },
+        { path: `/projects/${projectId}/sites`, label: 'Sites', icon: Server },
+        { path: `/projects/${projectId}/settings`, label: 'Settings', icon: Settings },
       ]
     : []
 
@@ -49,7 +47,7 @@ export function Sidebar() {
         <div className="mb-6">
           {sidebarOpen && (
             <p className="px-4 mb-2 text-xs font-semibold text-gray-500 uppercase tracking-wider">
-              Admin
+              Main
             </p>
           )}
           {navItems.map((item) => (
@@ -71,14 +69,14 @@ export function Sidebar() {
           ))}
         </div>
 
-        {tenantId && (
+        {projectId && (
           <div>
             {sidebarOpen && (
               <p className="px-4 mb-2 text-xs font-semibold text-gray-500 uppercase tracking-wider">
-                Tenant
+                Project
               </p>
             )}
-            {tenantNavItems.map((item) => (
+            {projectNavItems.map((item) => (
               <NavLink
                 key={item.path}
                 to={item.path}

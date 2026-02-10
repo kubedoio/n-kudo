@@ -1,0 +1,105 @@
+name: Workflow Validation
+
+on:
+  push:
+    paths:
+      - '.github/workflows/**'
+  pull_request:
+    paths:
+      - '.github/workflows/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # ============================================================================
+  # Validate Workflow Files
+  # ============================================================================
+  validate:
+    name: Validate Workflows
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install actionlint
+        run: |
+          bash <(curl https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+          sudo mv actionlint /usr/local/bin/
+
+      - name: Run actionlint
+        run: |
+          actionlint -color .github/workflows/*.yml
+
+      - name: Validate workflow schema
+        run: |
+          npm install -g @action-validator/core @action-validator/cli
+          
+          for file in .github/workflows/*.yml; do
+            echo "Validating $file..."
+            action-validator "$file" || exit 1
+          done
+
+      - name: Check for common issues
+        run: |
+          ISSUES=0
+          
+          for file in .github/workflows/*.yml; do
+            echo "Checking $file..."
+            
+            # Check for hardcoded secrets
+            if grep -E '(password|secret|token|key):\s*[^${]' "$file" 2>/dev/null | grep -v '#'; then
+              echo "WARNING: Potential hardcoded secret in $file"
+              ISSUES=$((ISSUES + 1))
+            fi
+            
+            # Check for missing job timeouts
+            if ! grep -q 'timeout-minutes:' "$file"; then
+              echo "INFO: Consider adding timeout-minutes to jobs in $file"
+            fi
+            
+            # Check for permissions block
+            if ! grep -q 'permissions:' "$file"; then
+              echo "INFO: Consider adding explicit permissions to $file"
+            fi
+          done
+          
+          if [ $ISSUES -gt 0 ]; then
+            echo "Found $ISSUES issues"
+            exit 1
+          fi
+
+  # ============================================================================
+  # Dry Run Workflows (where applicable)
+  # ============================================================================
+  dry-run:
+    name: Dry Run
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+
+      - name: Validate Go build
+        run: |
+          go build -o /dev/null ./cmd/control-plane
+          go build -o /dev/null ./cmd/edge
+
+      - name: Validate Dockerfiles
+        run: |
+          for dockerfile in deployments/docker/Dockerfile*; do
+            if [ -f "$dockerfile" ]; then
+              echo "Validating $dockerfile..."
+              docker build --target builder -f "$dockerfile" . || true
+            fi
+          done

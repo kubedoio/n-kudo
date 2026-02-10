@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -24,6 +25,8 @@ import (
 	"github.com/kubedoio/n-kudo/internal/edge/mtls"
 	"github.com/kubedoio/n-kudo/internal/edge/netbird"
 	"github.com/kubedoio/n-kudo/internal/edge/providers/cloudhypervisor"
+	"github.com/kubedoio/n-kudo/internal/edge/providers/firecracker"
+	"github.com/kubedoio/n-kudo/internal/edge/securestate"
 	"github.com/kubedoio/n-kudo/internal/edge/state"
 )
 
@@ -34,7 +37,120 @@ const (
 	defaultPKIDir     = "/var/lib/nkudo-edge/pki"
 	defaultRuntimeDir = "/var/lib/nkudo-edge/vms"
 	defaultInterval   = 15 * time.Second
+
+	providerCloudHypervisor = "cloud-hypervisor"
+	providerFirecracker     = "firecracker"
+	providerAuto            = "auto"
 )
+
+// StateStore is the interface for state storage, satisfied by both
+// state.Store and securestate.Store
+type StateStore interface {
+	Close() error
+	SaveIdentity(identity state.Identity) error
+	LoadIdentity() (state.Identity, error)
+	UpsertMicroVM(vm state.MicroVM) error
+	GetMicroVM(vmID string) (state.MicroVM, bool, error)
+	DeleteMicroVM(vmID string) error
+	ListMicroVMs() ([]state.MicroVM, error)
+	GetActionRecord(actionID string) (state.ActionRecord, bool, error)
+	PutActionRecord(record state.ActionRecord) error
+}
+
+// openState opens the state store, using securestate if NKUDO_STATE_KEY is set,
+// otherwise falling back to the standard unencrypted state store.
+func openState(dir string) (StateStore, error) {
+	// Try secure state first - it will use NKUDO_STATE_KEY if available
+	store, err := securestate.Open(dir)
+	if err == nil {
+		return store, nil
+	}
+
+	// If the error indicates encrypted file exists but no key, fail
+	if errors.Is(err, securestate.ErrInvalidKey) ||
+		(err != nil && containsString(err.Error(), "encrypted state file exists")) {
+		return nil, err
+	}
+
+	// Fall back to unencrypted state store
+	log.Println("[main] Falling back to unencrypted state store")
+	return state.Open(dir)
+}
+
+func containsString(s, substr string) bool {
+	return strings.Contains(s, substr)
+}
+
+// providerSelection holds the selected provider info
+type providerSelection struct {
+	Name     string
+	Binary   string
+	Provider executor.MicroVMProvider
+}
+
+// autoDetectProvider detects which VM provider is available.
+// It prefers cloud-hypervisor over firecracker if both are available.
+func autoDetectProvider() (string, string) {
+	// Check cloud-hypervisor first
+	if _, err := exec.LookPath("cloud-hypervisor"); err == nil {
+		return providerCloudHypervisor, "cloud-hypervisor"
+	}
+	// Fall back to firecracker
+	if _, err := exec.LookPath("firecracker"); err == nil {
+		return providerFirecracker, "firecracker"
+	}
+	// Default to cloud-hypervisor even if not found (will fail later with clear error)
+	return providerCloudHypervisor, "cloud-hypervisor"
+}
+
+// selectProvider creates the appropriate provider based on configuration.
+func selectProvider(providerName, chBin, fcBin string, st StateStore, runtimeDir string) (*providerSelection, error) {
+	// Auto-detect if needed
+	if providerName == providerAuto || providerName == "" {
+		detected, bin := autoDetectProvider()
+		log.Printf("[main] Auto-detected provider: %s (binary: %s)", detected, bin)
+		providerName = detected
+		if detected == providerCloudHypervisor && chBin == "" {
+			chBin = bin
+		} else if detected == providerFirecracker && fcBin == "" {
+			fcBin = bin
+		}
+	}
+
+	switch providerName {
+	case providerCloudHypervisor:
+		if chBin == "" {
+			chBin = "cloud-hypervisor"
+		}
+		provider := &cloudhypervisor.Provider{
+			Binary:     chBin,
+			State:      st,
+			RuntimeDir: runtimeDir,
+		}
+		return &providerSelection{
+			Name:     providerCloudHypervisor,
+			Binary:   chBin,
+			Provider: provider,
+		}, nil
+	case providerFirecracker:
+		if fcBin == "" {
+			fcBin = "firecracker"
+		}
+		provider := &firecracker.Provider{
+			Binary:     fcBin,
+			State:      st,
+			RuntimeDir: runtimeDir,
+		}
+		return &providerSelection{
+			Name:     providerFirecracker,
+			Binary:   fcBin,
+			Provider: provider,
+		}, nil
+	default:
+		return nil, fmt.Errorf("unknown provider: %s (valid: %s, %s, %s)",
+			providerName, providerCloudHypervisor, providerFirecracker, providerAuto)
+	}
+}
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.LUTC)
@@ -166,7 +282,7 @@ func runEnroll(ctx context.Context, args []string) error {
 		return err
 	}
 
-	st, err := state.Open(*stateDir)
+	st, err := openState(*stateDir)
 	if err != nil {
 		return err
 	}
@@ -206,7 +322,9 @@ func runApply(ctx context.Context, args []string) error {
 		planFile   = fs.String("plan", "", "Path to plan JSON")
 		stateDir   = fs.String("state-dir", defaultStateDir, "State directory")
 		runtimeDir = fs.String("runtime-dir", defaultRuntimeDir, "Runtime directory")
+		provider   = fs.String("provider", providerAuto, "VM provider: cloud-hypervisor, firecracker, auto")
 		chBin      = fs.String("cloud-hypervisor-bin", "cloud-hypervisor", "Cloud Hypervisor binary path")
+		fcBin      = fs.String("firecracker-bin", "firecracker", "Firecracker binary path")
 		logFormat  = fs.String("log-format", "text", "Log format: json or text")
 		logLevel   = fs.String("log-level", "info", "Log level: debug, info, warn, error")
 	)
@@ -220,7 +338,7 @@ func runApply(ctx context.Context, args []string) error {
 	// Initialize structured logger
 	logger.Init(*logFormat, *logLevel)
 
-	st, err := state.Open(*stateDir)
+	st, err := openState(*stateDir)
 	if err != nil {
 		return err
 	}
@@ -230,8 +348,16 @@ func runApply(ctx context.Context, args []string) error {
 		return err
 	}
 
-	provider := &cloudhypervisor.Provider{Binary: *chBin, State: st, RuntimeDir: *runtimeDir}
-	exec := &executor.Executor{Store: st, Provider: provider, Logs: &stdoutSink{}}
+	sel, err := selectProvider(*provider, *chBin, *fcBin, st, *runtimeDir)
+	if err != nil {
+		return err
+	}
+	logger.WithFields(map[string]interface{}{
+		"provider": sel.Name,
+		"binary":   sel.Binary,
+	}).Info("Using VM provider")
+
+	exec := &executor.Executor{Store: st, Provider: sel.Provider, Logs: &stdoutSink{}}
 
 	plan, err := readPlan(*planFile)
 	if err != nil {
@@ -265,7 +391,9 @@ func runService(ctx context.Context, args []string) error {
 		netbirdProbeTimeout = fs.Duration("netbird-probe-timeout", 5*time.Second, "NetBird probe timeout")
 		netbirdProbeHTTPMin = fs.Int("netbird-probe-http-min", 200, "NetBird HTTP probe minimum status code")
 		netbirdProbeHTTPMax = fs.Int("netbird-probe-http-max", 399, "NetBird HTTP probe maximum status code")
+		providerName        = fs.String("provider", providerAuto, "VM provider: cloud-hypervisor, firecracker, auto")
 		chBin               = fs.String("cloud-hypervisor-bin", "cloud-hypervisor", "Cloud Hypervisor binary")
+		fcBin               = fs.String("firecracker-bin", "firecracker", "Firecracker binary")
 		metricsAddr         = fs.String("metrics-addr", ":9090", "Metrics server address")
 		logFormat           = fs.String("log-format", "text", "Log format: json or text")
 		logLevel            = fs.String("log-level", "info", "Log level: debug, info, warn, error")
@@ -290,7 +418,7 @@ func runService(ctx context.Context, args []string) error {
 		}
 	}()
 
-	st, err := state.Open(*stateDir)
+	st, err := openState(*stateDir)
 	if err != nil {
 		return err
 	}
@@ -310,10 +438,18 @@ func runService(ctx context.Context, args []string) error {
 	}
 
 	cp := &enroll.Client{BaseURL: *controlPlane, HTTP: httpClient}
-	provider := &cloudhypervisor.Provider{Binary: *chBin, State: st, RuntimeDir: *runtimeDir}
+	sel, err := selectProvider(*providerName, *chBin, *fcBin, st, *runtimeDir)
+	if err != nil {
+		return err
+	}
+	logger.WithFields(map[string]interface{}{
+		"provider": sel.Name,
+		"binary":   sel.Binary,
+	}).Info("Using VM provider")
+
 	nb := netbird.Client{Binary: *netbirdBin}
 	sink := &streamSink{Identity: id, Client: cp}
-	exec := &executor.Executor{Store: st, Provider: provider, Logs: sink}
+	exec := &executor.Executor{Store: st, Provider: sel.Provider, Logs: sink}
 
 	// Start certificate rotator
 	certRotator := mtls.NewCertRotator(pki, id, cp)
@@ -463,7 +599,7 @@ func runService(ctx context.Context, args []string) error {
 
 			// Stop all running VMs gracefully
 			logger.Info("stopping all running VMs...")
-			if err := stopAllVMsGracefully(context.Background(), st, provider); err != nil {
+			if err := stopAllVMsGracefully(context.Background(), st, sel.Provider); err != nil {
 				logger.WithFields(map[string]interface{}{
 					"error": err.Error(),
 				}).Warn("error stopping VMs during shutdown")
@@ -500,7 +636,7 @@ func runStatus(args []string) error {
 	}
 
 	// Load identity
-	st, err := state.Open(*stateDir)
+	st, err := openState(*stateDir)
 	if err != nil {
 		return fmt.Errorf("open state: %w", err)
 	}
@@ -633,7 +769,7 @@ func splitCommand(raw string) []string {
 	return strings.Fields(trimmed)
 }
 
-func stopAllVMsGracefully(ctx context.Context, st *state.Store, provider *cloudhypervisor.Provider) error {
+func stopAllVMsGracefully(ctx context.Context, st StateStore, provider executor.MicroVMProvider) error {
 	vms, err := st.ListMicroVMs()
 	if err != nil {
 		return fmt.Errorf("list VMs: %w", err)
@@ -652,7 +788,7 @@ func stopAllVMsGracefully(ctx context.Context, st *state.Store, provider *cloudh
 			logger.WithFields(map[string]interface{}{
 				"vm_id": vmID,
 			}).Info("stopping VM gracefully")
-			if err := provider.StopVM(ctx, vmID); err != nil {
+			if err := provider.Stop(ctx, vmID); err != nil {
 				errCh <- fmt.Errorf("stop VM %s: %w", vmID, err)
 			}
 		}(vm.ID)
@@ -671,7 +807,7 @@ func stopAllVMsGracefully(ctx context.Context, st *state.Store, provider *cloudh
 	return nil
 }
 
-func sendFinalHeartbeat(ctx context.Context, cp *enroll.Client, id state.Identity, st *state.Store, lastNBStatus netbird.Status) error {
+func sendFinalHeartbeat(ctx context.Context, cp *enroll.Client, id state.Identity, st StateStore, lastNBStatus netbird.Status) error {
 	vms, _ := st.ListMicroVMs()
 
 	hbReq := enroll.HeartbeatRequest{

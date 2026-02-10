@@ -1,9 +1,8 @@
 import { render, screen, waitFor, fireEvent } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { BrowserRouter, Routes, Route, MemoryRouter } from 'react-router-dom'
+import { Routes, Route, MemoryRouter } from 'react-router-dom'
 import { SiteDashboard } from '../SiteDashboard'
 import { describe, it, expect, vi } from 'vitest'
-import type { ReactNode } from 'react'
 import React from 'react'
 
 // Mock the toast store
@@ -15,7 +14,7 @@ vi.mock('@/stores/toastStore', () => ({
 }))
 
 // Helper to render with MemoryRouter for route params
-const renderWithParams = (tenantId = '1', siteId = 'site-1') => {
+const renderWithParams = (projectId = '1', siteId = 'site-1') => {
   const queryClient = new QueryClient({
     defaultOptions: { 
       queries: { 
@@ -26,11 +25,11 @@ const renderWithParams = (tenantId = '1', siteId = 'site-1') => {
   })
 
   return render(
-    React.createElement(MemoryRouter, { initialEntries: [`/tenant/${tenantId}/sites/${siteId}`] },
+    React.createElement(MemoryRouter, { initialEntries: [`/projects/${projectId}/sites/${siteId}`] },
       React.createElement(QueryClientProvider, { client: queryClient },
         React.createElement(Routes, null,
           React.createElement(Route, { 
-            path: '/tenant/:tenantId/sites/:siteId', 
+            path: '/projects/:projectId/sites/:siteId', 
             element: React.createElement(SiteDashboard) 
           })
         )

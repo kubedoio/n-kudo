@@ -1,0 +1,63 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "nkudo.configMapName" . }}
+  labels:
+    {{- include "nkudo.labels" . | nindent 4 }}
+data:
+  # Logging configuration
+  NKUDO_LOG_LEVEL: {{ .Values.logging.level | quote }}
+  NKUDO_LOG_FORMAT: {{ .Values.logging.format | quote }}
+  NKUDO_REQUEST_LOGGING: {{ .Values.logging.requestLogging | quote }}
+  
+  # Server configuration
+  NKUDO_HTTP_BIND: {{ .Values.config.server.httpBind | quote }}
+  NKUDO_GRPC_BIND: {{ .Values.config.server.grpcBind | quote }}
+  NKUDO_METRICS_BIND: {{ .Values.config.server.metricsBind | quote }}
+  NKUDO_REQUEST_TIMEOUT: {{ .Values.config.server.timeout | quote }}
+  NKUDO_MAX_REQUEST_SIZE: {{ .Values.config.server.maxRequestSize | quote }}
+  
+  # CORS configuration
+  NKUDO_CORS_ENABLED: {{ .Values.config.server.cors.enabled | quote }}
+  {{- if .Values.config.server.cors.enabled }}
+  NKUDO_CORS_ALLOWED_ORIGINS: {{ join "," .Values.config.server.cors.allowedOrigins | quote }}
+  NKUDO_CORS_ALLOWED_METHODS: {{ join "," .Values.config.server.cors.allowedMethods | quote }}
+  NKUDO_CORS_ALLOWED_HEADERS: {{ join "," .Values.config.server.cors.allowedHeaders | quote }}
+  {{- end }}
+  
+  # Edge configuration
+  NKUDO_HEARTBEAT_INTERVAL: {{ .Values.config.edge.heartbeatInterval | quote }}
+  NKUDO_HEARTBEAT_TIMEOUT: {{ .Values.config.edge.heartbeatTimeout | quote }}
+  NKUDO_RECONNECT_BACKOFF: {{ .Values.config.edge.reconnectBackoff | quote }}
+  
+  # VM configuration
+  NKUDO_DEFAULT_VM_NAMESPACE: {{ .Values.config.vm.defaultNamespace | quote }}
+  NKUDO_VM_ENABLE_SNAPSHOTS: {{ .Values.config.vm.enableSnapshots | quote }}
+  NKUDO_SNAPSHOT_RETENTION: {{ .Values.config.vm.snapshotRetention | quote }}
+  
+  # Feature flags
+  NKUDO_FEATURE_AUDIT_LOGGING: {{ .Values.config.features.auditLogging | quote }}
+  NKUDO_FEATURE_PLAN_EXECUTION: {{ .Values.config.features.planExecution | quote }}
+  NKUDO_FEATURE_AUTO_ENROLLMENT: {{ .Values.config.features.autoEnrollment | quote }}
+  NKUDO_FEATURE_MULTI_TENANCY: {{ .Values.config.features.multiTenancy | quote }}
+  
+  # mTLS configuration
+  NKUDO_MTLS_ENABLED: {{ .Values.security.mtls.enabled | quote }}
+  {{- if .Values.security.mtls.enabled }}
+  NKUDO_CERT_VALIDITY: {{ .Values.security.mtls.certValidity | quote }}
+  {{- end }}
+  
+  # JWT configuration
+  NKUDO_JWT_EXPIRY: {{ .Values.security.jwt.expiry | quote }}
+  
+  # Database configuration (non-sensitive)
+  {{- if not .Values.postgresql.enabled }}
+  NKUDO_DB_HOST: {{ .Values.database.external.host | quote }}
+  NKUDO_DB_PORT: {{ .Values.database.external.port | quote }}
+  NKUDO_DB_NAME: {{ .Values.database.external.database | quote }}
+  NKUDO_DB_USER: {{ .Values.database.external.user | quote }}
+  NKUDO_DB_SSL_MODE: {{ .Values.database.external.sslMode | quote }}
+  NKUDO_DB_MAX_OPEN_CONNS: {{ .Values.database.external.maxOpenConns | quote }}
+  NKUDO_DB_MAX_IDLE_CONNS: {{ .Values.database.external.maxIdleConns | quote }}
+  NKUDO_DB_CONN_MAX_LIFETIME: {{ .Values.database.external.connMaxLifetime | quote }}
+  {{- end }}

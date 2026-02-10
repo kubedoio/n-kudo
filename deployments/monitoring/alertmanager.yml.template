@@ -1,0 +1,77 @@
+# =============================================================================
+# n-kudo Alertmanager Configuration Template
+# =============================================================================
+# This is a template file. Use envsubst to generate the actual config:
+#   envsubst < alertmanager.yml.template > alertmanager.yml
+# =============================================================================
+
+global:
+  smtp_from: "${ALERTMANAGER_SMTP_FROM:-alerts@nkudo.io}"
+  smtp_smarthost: "${ALERTMANAGER_SMTP_HOST:-smtp.example.com:587}"
+  smtp_auth_username: "${ALERTMANAGER_SMTP_USER:-}"
+  smtp_auth_password: "${ALERTMANAGER_SMTP_PASS:-}"
+  smtp_require_tls: true
+  resolve_timeout: 5m
+  external_url: "https://alertmanager.nkudo.io"
+
+templates:
+  - '/etc/alertmanager/templates/*.tmpl'
+
+inhibit_rules:
+  - source_match:
+      severity: 'critical'
+    target_match:
+      severity: 'warning'
+    equal:
+      - service
+      - component
+      - instance
+  - source_match:
+      severity: 'warning'
+    target_match:
+      severity: 'info'
+    equal:
+      - alertname
+      - service
+
+route:
+  receiver: 'null-receiver'
+  group_by: ['alertname', 'service', 'component', 'severity']
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  routes:
+    - match:
+        severity: critical
+      receiver: pagerduty-critical
+      group_wait: 0s
+      group_interval: 2m
+      repeat_interval: 1h
+      continue: true
+    - match:
+        severity: warning
+      receiver: slack-warnings
+      group_wait: 1m
+      group_interval: 5m
+      repeat_interval: 2h
+      continue: true
+    - match:
+        severity: info
+      receiver: null-receiver
+      continue: false
+
+receivers:
+  - name: null-receiver
+  - name: pagerduty-critical
+    pagerduty_configs:
+      - service_key: "${ALERTMANAGER_PD_SERVICE_KEY:-PLACEHOLDER_PD_KEY}"
+        description: '{{ .CommonAnnotations.summary }}'
+        severity: critical
+  - name: slack-warnings
+    slack_configs:
+      - api_url: "${ALERTMANAGER_SLACK_WEBHOOK:-https://hooks.slack.com/services/PLACEHOLDER/PLACEHOLDER/PLACEHOLDER}"
+        channel: '#nkudo-alerts'
+        username: 'Alertmanager'
+        icon_emoji: ':warning:'
+        title: '[{{ .Status | toUpper }}:{{ .CommonLabels.severity | toUpper }}] {{ .CommonAnnotations.summary }}'
+        send_resolved: true

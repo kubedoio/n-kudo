@@ -1,0 +1,17 @@
+#!/bin/bash
+set -e
+
+# n-kudo edge agent pre-removal script
+
+# Stop and disable the service if running
+if systemctl is-active --quiet nkudo-edge.service 2>/dev/null; then
+    systemctl stop nkudo-edge.service
+fi
+
+if systemctl is-enabled --quiet nkudo-edge.service 2>/dev/null; then
+    systemctl disable nkudo-edge.service
+fi
+
+#DEBHELPER#
+
+exit 0

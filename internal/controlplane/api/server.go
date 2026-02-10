@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/kubedoio/n-kudo/internal/controlplane/audit"
 	"github.com/kubedoio/n-kudo/internal/controlplane/cache"
 	store "github.com/kubedoio/n-kudo/internal/controlplane/db"
 	"github.com/kubedoio/n-kudo/internal/controlplane/health"
@@ -40,10 +41,11 @@ type App struct {
 	mux           *http.ServeMux
 	cache         Cache
 	healthChecker *health.Checker
+	emailService  *EmailService
 
 	// Metrics counters
 	metrics struct {
-		requestsTotal   atomic.Int64
+		requestsTotal    atomic.Int64
 		enrollmentsTotal atomic.Int64
 		heartbeatsTotal  atomic.Int64
 		plansApplied     atomic.Int64
@@ -55,6 +57,12 @@ type App struct {
 
 	// Quota manager for tenant resource limits
 	quotaManager *tenant.QuotaManager
+
+	// API key protection for brute force prevention
+	apiKeyProtector *APIKeyProtector
+
+	// Audit chain manager for audit log integrity
+	auditChain *audit.ChainManager
 }
 
 // Cache interface for caching
@@ -100,16 +108,18 @@ func NewApp(cfg Config, repo store.Repo) (*App, error) {
 	appCache := cache.New(5*time.Minute, 10*time.Minute)
 
 	a := &App{
-		cfg:         cfg,
-		repo:        repo,
-		ca:          ca,
-		crlManager:  crlManager,
-		serverCert:  serverCert,
-		mux:         http.NewServeMux(),
-		cache:       appCache,
-		rateLimiter: NewRateLimiter(cfg.RateLimit),
+		cfg:             cfg,
+		repo:            repo,
+		ca:              ca,
+		crlManager:      crlManager,
+		serverCert:      serverCert,
+		mux:             http.NewServeMux(),
+		cache:           appCache,
+		rateLimiter:     NewRateLimiter(cfg.RateLimit),
+		apiKeyProtector: NewAPIKeyProtector(DefaultAPIKeyProtectionConfig()),
+		emailService:    NewEmailService(cfg),
 	}
-	
+
 	// Initialize quota manager with adapter to convert store types to tenant types
 	a.quotaManager = tenant.NewQuotaManagerWithProvider(func(ctx context.Context, tenantID string) (*tenant.QuotaUsage, error) {
 		usage, err := repo.GetTenantUsage(ctx, tenantID)
@@ -124,8 +134,12 @@ func NewApp(cfg Config, repo store.Repo) (*App, error) {
 			APIKeys:     usage.APIKeys,
 		}, nil
 	})
-	
+
 	a.setupHealthChecker(repo)
+
+	// Initialize audit chain manager
+	a.auditChain = audit.NewChainManager(repo)
+
 	a.registerRoutes()
 	return a, nil
 }
@@ -204,10 +218,42 @@ func (a *App) TLSConfig() (*tls.Config, error) {
 	}, nil
 }
 
+// CA returns the internal CA instance
+func (a *App) CA() *InternalCA {
+	return a.ca
+}
+
 func (a *App) registerRoutes() {
 	a.mux.HandleFunc("GET /healthz", a.handleHealthz)
 	a.mux.HandleFunc("GET /readyz", a.handleReadyz)
 	a.mux.HandleFunc("GET /metrics", a.handleMetrics)
+
+	// Public auth routes (no authentication required)
+	a.mux.HandleFunc("POST /auth/register", a.handleRegister)
+	a.mux.HandleFunc("POST /auth/login", a.handleLogin)
+
+	// Authenticated routes
+	a.mux.Handle("GET /auth/me", a.authMiddleware(http.HandlerFunc(a.handleGetMe)))
+
+	// Email verification routes
+	a.mux.HandleFunc("GET /auth/verify-email", a.handleVerifyEmail) // Public, uses token
+	a.mux.Handle("POST /auth/resend-verification", a.authMiddleware(http.HandlerFunc(a.handleResendVerification)))
+
+	// Team invitation routes
+	a.mux.Handle("POST /invitations", a.authMiddleware(http.HandlerFunc(a.handleCreateInvitation)))
+	a.mux.Handle("GET /invitations", a.authMiddleware(http.HandlerFunc(a.handleListInvitations)))
+	a.mux.Handle("DELETE /invitations/{invitationID}", a.authMiddleware(http.HandlerFunc(a.handleCancelInvitation)))
+	a.mux.Handle("GET /my/invitations", a.authMiddleware(http.HandlerFunc(a.handleGetMyInvitations)))
+	a.mux.HandleFunc("POST /invitations/accept", a.handleAcceptInvitation) // Public, uses token in body
+
+	// Project routes (user-scoped, JWT auth)
+	a.mux.Handle("GET /projects", a.authMiddleware(http.HandlerFunc(a.handleListMyProjects)))
+	a.mux.Handle("POST /projects", a.authMiddleware(http.HandlerFunc(a.handleCreateProject)))
+	a.mux.Handle("GET /projects/{projectID}", a.authMiddleware(http.HandlerFunc(a.handleGetProjectByID)))
+	a.mux.Handle("POST /projects/{projectID}/switch", a.authMiddleware(http.HandlerFunc(a.handleSwitchProject)))
+	a.mux.Handle("GET /my/project", a.authMiddleware(http.HandlerFunc(a.handleGetMyProject)))
+
+	// Admin routes (require admin key)
 	a.mux.Handle("POST /tenants", a.adminAuth(http.HandlerFunc(a.handleCreateTenant)))
 	a.mux.Handle("GET /tenants", a.adminAuth(http.HandlerFunc(a.handleListTenants)))
 	a.mux.Handle("POST /tenants/{tenantID}/api-keys", a.adminAuth(http.HandlerFunc(a.handleCreateAPIKey)))
@@ -245,6 +291,16 @@ func (a *App) registerRoutes() {
 	a.mux.Handle("POST /admin/audit/verify", a.adminAuth(http.HandlerFunc(a.handleVerifyAuditChain)))
 	a.mux.Handle("GET /admin/audit/events", a.adminAuth(http.HandlerFunc(a.handleListAuditEvents)))
 	a.mux.Handle("GET /admin/audit/chain-info", a.adminAuth(http.HandlerFunc(a.handleAuditChainInfo)))
+
+	// VXLAN network endpoints
+	a.mux.Handle("POST /sites/{siteID}/vxlan-networks", a.apiKeyAuth(http.HandlerFunc(a.handleCreateVXLANNetwork)))
+	a.mux.Handle("GET /sites/{siteID}/vxlan-networks", a.apiKeyAuth(http.HandlerFunc(a.handleListVXLANNetworks)))
+	a.mux.Handle("GET /vxlan-networks/{networkID}", a.apiKeyAuth(http.HandlerFunc(a.handleGetVXLANNetwork)))
+	a.mux.Handle("DELETE /vxlan-networks/{networkID}", a.apiKeyAuth(http.HandlerFunc(a.handleDeleteVXLANNetwork)))
+
+	// VM network attachment endpoints
+	a.mux.Handle("POST /vms/{vmID}/networks", a.apiKeyAuth(http.HandlerFunc(a.handleAttachVMToNetwork)))
+	a.mux.Handle("DELETE /vms/{vmID}/networks/{networkID}", a.apiKeyAuth(http.HandlerFunc(a.handleDetachVMFromNetwork)))
 }
 
 func (a *App) withRequestLogging(next http.Handler) http.Handler {
@@ -276,8 +332,25 @@ type cachedAPIKeyValidation struct {
 
 func (a *App) apiKeyAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		clientIP := getClientIP(r)
+
+		// Check if client IP is blocked due to too many failed attempts
+		if a.apiKeyProtector.IsBlocked(clientIP) {
+			_, blockedUntil, _ := a.apiKeyProtector.GetBlockInfo(clientIP)
+
+			msg := "API key authentication blocked due to too many failed attempts"
+			if blockedUntil != nil {
+				msg = "API key authentication blocked due to too many failed attempts. Try again after " + blockedUntil.Format(time.RFC3339)
+			}
+
+			writeError(w, http.StatusForbidden, msg)
+			return
+		}
+
 		apiKey := strings.TrimSpace(r.Header.Get("X-API-Key"))
 		if apiKey == "" {
+			// Record failed attempt
+			a.apiKeyProtector.RecordFailure(clientIP)
 			writeError(w, http.StatusUnauthorized, "missing api key")
 			return
 		}
@@ -288,6 +361,8 @@ func (a *App) apiKeyAuth(next http.Handler) http.Handler {
 		if cached, found := a.cache.Get(cacheKey); found {
 			if validation, ok := cached.(cachedAPIKeyValidation); ok && validation.Valid {
 				sla.RecordCacheHit()
+				// Clear any failed attempts on successful authentication
+				a.apiKeyProtector.RecordSuccess(clientIP)
 				ctx := context.WithValue(r.Context(), ctxTenantID{}, validation.TenantID)
 				next.ServeHTTP(w, r.WithContext(ctx))
 				return
@@ -300,6 +375,8 @@ func (a *App) apiKeyAuth(next http.Handler) http.Handler {
 			status := http.StatusInternalServerError
 			if errors.Is(err, store.ErrUnauthorized) {
 				status = http.StatusUnauthorized
+				// Record failed attempt for invalid API key
+				a.apiKeyProtector.RecordFailure(clientIP)
 			}
 			writeError(w, status, "invalid api key")
 			return
@@ -310,6 +387,9 @@ func (a *App) apiKeyAuth(next http.Handler) http.Handler {
 			TenantID: validation.TenantID,
 			Valid:    true,
 		}, apiKeyCacheTTL)
+
+		// Clear any failed attempts on successful authentication
+		a.apiKeyProtector.RecordSuccess(clientIP)
 
 		ctx := context.WithValue(r.Context(), ctxTenantID{}, validation.TenantID)
 		next.ServeHTTP(w, r.WithContext(ctx))
@@ -402,6 +482,15 @@ func (a *App) handleCreateTenant(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = a.writeAudit(r.Context(), tenant.ID, "", "SYSTEM", "", "tenant.create", "tenant", tenant.ID, requestID(r), sourceIP(r), nil)
 	writeJSON(w, http.StatusCreated, tenant)
+}
+
+func (a *App) handleListTenants(w http.ResponseWriter, r *http.Request) {
+	tenants, err := a.repo.ListTenants(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list tenants")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"tenants": tenants})
 }
 
 func (a *App) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
@@ -1431,7 +1520,6 @@ func sourceIP(r *http.Request) string {
 	return host
 }
 
-
 func (a *App) handleUnenroll(w http.ResponseWriter, r *http.Request) {
 	agent := r.Context().Value(ctxAgent{}).(store.Agent)
 	type request struct {
@@ -1567,12 +1655,31 @@ func (a *App) handleMetrics(w http.ResponseWriter, r *http.Request) {
 
 	fmt.Fprintf(w, "# HELP nkudo_rate_limit_blocks_total Total number of rate limiter blocks (rejected requests)\n")
 	fmt.Fprintf(w, "# TYPE nkudo_rate_limit_blocks_total counter\n")
-	fmt.Fprintf(w, "nkudo_rate_limit_blocks_total %d\n", blocks)
+	fmt.Fprintf(w, "nkudo_rate_limit_blocks_total %d\n\n", blocks)
+
+	// API key protection metrics - collect from Prometheus registry
+	// The APIKeyBlockedAttemptsTotal counter is maintained by the protector
+	fmt.Fprintf(w, "# HELP nkudo_api_key_blocked_attempts_total Total number of blocked API key authentication attempts\n")
+	fmt.Fprintf(w, "# TYPE nkudo_api_key_blocked_attempts_total counter\n")
+	// Output a zero value to show the metric exists (actual values are in Prometheus format via the registry)
+	fmt.Fprintf(w, "nkudo_api_key_blocked_attempts_total{ip_address=\"all\"} 0\n")
 }
 
-// Stub handlers for audit endpoints - full implementation in Phase 4.4
+// Audit endpoint handlers
 func (a *App) handleVerifyAuditChain(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"valid": true, "verified_count": 0})
+	result, err := a.auditChain.VerifyChain(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to verify audit chain: %v", err))
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"valid":          result.Valid,
+		"total":          result.Total,
+		"invalid":        result.Invalid,
+		"first_valid":    result.FirstValid,
+		"verified_count": result.Total,
+	})
 }
 
 func (a *App) handleListAuditEvents(w http.ResponseWriter, r *http.Request) {
@@ -1594,11 +1701,32 @@ func (a *App) handleListAuditEvents(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleAuditChainInfo(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{
-		"chain_length":    0,
-		"last_event_time": nil,
-		"integrity_valid": true,
-	})
+	info, err := a.auditChain.GetChainInfo(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to get chain info: %v", err))
+		return
+	}
+
+	writeJSON(w, http.StatusOK, info)
+}
+
+// StartBackgroundVerifier starts the background audit chain verifier.
+// It returns a stop function that should be called during shutdown.
+func (a *App) StartBackgroundVerifier(ctx context.Context) (stop func()) {
+	if a.cfg.AuditVerifyInterval <= 0 {
+		log.Println("[audit] Background verifier disabled (interval <= 0)")
+		return func() {}
+	}
+
+	verifier := audit.NewBackgroundVerifier(a.auditChain, a.cfg.AuditVerifyInterval)
+	go verifier.Start(ctx)
+
+	log.Printf("[audit] Background verifier started with interval %v", a.cfg.AuditVerifyInterval)
+
+	return func() {
+		log.Println("[audit] Stopping background verifier...")
+		verifier.Stop()
+	}
 }
 
 // handleHealthz returns a simple liveness check
@@ -1656,4 +1784,211 @@ func (a *App) handleGetCRLPEM(w http.ResponseWriter, r *http.Request) {
 // writeAudit is a helper to write audit events
 func (a *App) writeAudit(ctx context.Context, tenantID, siteID, actorType, actorID, action, resourceType, resourceID, requestID, sourceIP string, metadata []byte) error {
 	return a.repo.WriteAudit(ctx, tenantID, siteID, actorType, actorID, action, resourceType, resourceID, requestID, sourceIP, metadata)
+}
+
+
+// VXLAN Network Handlers
+
+func (a *App) handleCreateVXLANNetwork(w http.ResponseWriter, r *http.Request) {
+	tenantID := r.Context().Value(ctxTenantID{}).(string)
+	siteID := r.PathValue("siteID")
+	ok, err := a.repo.SiteBelongsToTenant(r.Context(), siteID, tenantID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "site lookup failed")
+		return
+	}
+	if !ok {
+		writeError(w, http.StatusNotFound, "site not found")
+		return
+	}
+
+	type request struct {
+		Name    string `json:"name"`
+		VNI     int    `json:"vni"`
+		CIDR    string `json:"cidr"`
+		Gateway string `json:"gateway,omitempty"`
+		MTU     int    `json:"mtu,omitempty"`
+	}
+	var req request
+	if err := decodeJSON(r.Body, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if strings.TrimSpace(req.Name) == "" {
+		writeError(w, http.StatusBadRequest, "name is required")
+		return
+	}
+	if req.VNI < 1 || req.VNI > 16777215 {
+		writeError(w, http.StatusBadRequest, "VNI must be between 1 and 16777215")
+		return
+	}
+	if req.CIDR == "" {
+		writeError(w, http.StatusBadRequest, "CIDR is required")
+		return
+	}
+	if req.MTU == 0 {
+		req.MTU = 1450 // Default MTU for VXLAN
+	}
+
+	network := store.VXLANNetwork{
+		ID:      uuid.NewString(),
+		Name:    req.Name,
+		VNI:     req.VNI,
+		CIDR:    req.CIDR,
+		Gateway: req.Gateway,
+		MTU:     req.MTU,
+	}
+
+	created, err := a.repo.CreateVXLANNetwork(r.Context(), tenantID, siteID, network)
+	if err != nil {
+		if errors.Is(err, store.ErrConflict) {
+			writeError(w, http.StatusConflict, "VXLAN network with this VNI or name already exists")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to create VXLAN network")
+		return
+	}
+
+	_ = a.writeAudit(r.Context(), tenantID, siteID, "USER", "api-key", "vxlan_network.create", "vxlan_network", created.ID, requestID(r), sourceIP(r), nil)
+	writeJSON(w, http.StatusCreated, created)
+}
+
+func (a *App) handleListVXLANNetworks(w http.ResponseWriter, r *http.Request) {
+	tenantID := r.Context().Value(ctxTenantID{}).(string)
+	siteID := r.PathValue("siteID")
+	ok, err := a.repo.SiteBelongsToTenant(r.Context(), siteID, tenantID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "site lookup failed")
+		return
+	}
+	if !ok {
+		writeError(w, http.StatusNotFound, "site not found")
+		return
+	}
+
+	networks, err := a.repo.ListVXLANNetworks(r.Context(), tenantID, siteID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list VXLAN networks")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"networks": networks})
+}
+
+func (a *App) handleGetVXLANNetwork(w http.ResponseWriter, r *http.Request) {
+	tenantID := r.Context().Value(ctxTenantID{}).(string)
+	networkID := r.PathValue("networkID")
+
+	network, err := a.repo.GetVXLANNetwork(r.Context(), tenantID, networkID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "VXLAN network not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to get VXLAN network")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, network)
+}
+
+func (a *App) handleDeleteVXLANNetwork(w http.ResponseWriter, r *http.Request) {
+	tenantID := r.Context().Value(ctxTenantID{}).(string)
+	networkID := r.PathValue("networkID")
+
+	err := a.repo.DeleteVXLANNetwork(r.Context(), tenantID, networkID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "VXLAN network not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to delete VXLAN network")
+		return
+	}
+
+	_ = a.writeAudit(r.Context(), tenantID, "", "USER", "api-key", "vxlan_network.delete", "vxlan_network", networkID, requestID(r), sourceIP(r), nil)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// VM Network Attachment Handlers
+
+func (a *App) handleAttachVMToNetwork(w http.ResponseWriter, r *http.Request) {
+	tenantID := r.Context().Value(ctxTenantID{}).(string)
+	vmID := r.PathValue("vmID")
+
+	type request struct {
+		NetworkID  string `json:"network_id"`
+		IPAddress  string `json:"ip_address,omitempty"`
+		MACAddress string `json:"mac_address,omitempty"`
+	}
+	var req request
+	if err := decodeJSON(r.Body, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if req.NetworkID == "" {
+		writeError(w, http.StatusBadRequest, "network_id is required")
+		return
+	}
+
+	// Verify network belongs to tenant
+	belongs, err := a.repo.VXLANNetworkBelongsToTenant(r.Context(), req.NetworkID, tenantID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "network lookup failed")
+		return
+	}
+	if !belongs {
+		writeError(w, http.StatusNotFound, "network not found")
+		return
+	}
+
+	attachment := store.VMNetworkAttachment{
+		ID:         uuid.NewString(),
+		VMID:       vmID,
+		NetworkID:  req.NetworkID,
+		IPAddress:  req.IPAddress,
+		MACAddress: req.MACAddress,
+	}
+
+	created, err := a.repo.AttachVMToNetwork(r.Context(), attachment)
+	if err != nil {
+		if errors.Is(err, store.ErrConflict) {
+			writeError(w, http.StatusConflict, "VM already attached to this network")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to attach VM to network")
+		return
+	}
+
+	_ = a.writeAudit(r.Context(), tenantID, "", "USER", "api-key", "vm_network.attach", "vm_network_attachment", created.ID, requestID(r), sourceIP(r), nil)
+	writeJSON(w, http.StatusCreated, created)
+}
+
+func (a *App) handleDetachVMFromNetwork(w http.ResponseWriter, r *http.Request) {
+	tenantID := r.Context().Value(ctxTenantID{}).(string)
+	vmID := r.PathValue("vmID")
+	networkID := r.PathValue("networkID")
+
+	// Verify network belongs to tenant
+	belongs, err := a.repo.VXLANNetworkBelongsToTenant(r.Context(), networkID, tenantID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "network lookup failed")
+		return
+	}
+	if !belongs {
+		writeError(w, http.StatusNotFound, "network not found")
+		return
+	}
+
+	err = a.repo.DetachVMFromNetwork(r.Context(), vmID, networkID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "attachment not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to detach VM from network")
+		return
+	}
+
+	_ = a.writeAudit(r.Context(), tenantID, "", "USER", "api-key", "vm_network.detach", "vm_network_attachment", vmID+"/"+networkID, requestID(r), sourceIP(r), nil)
+	w.WriteHeader(http.StatusNoContent)
 }

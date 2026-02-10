@@ -11,10 +11,12 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
 	controlplane "github.com/kubedoio/n-kudo/internal/controlplane/api"
+	"github.com/kubedoio/n-kudo/internal/controlplane/grpc"
 	store "github.com/kubedoio/n-kudo/internal/controlplane/db"
 	"github.com/kubedoio/n-kudo/internal/controlplane/db/migrate"
 	_ "github.com/lib/pq"
@@ -94,6 +96,33 @@ func runServe(cfg controlplane.Config) error {
 		return err
 	}
 	app.StartBackgroundWorkers(ctx)
+
+	// Start background audit verifier
+	stopVerifier := app.StartBackgroundVerifier(ctx)
+
+	// Start gRPC server if enabled
+	var grpcServer *grpc.Server
+	if cfg.GRPC.Enabled {
+		grpcServer = grpc.NewServer(
+			cfg.GRPC,
+			repo,
+			app.CA(),
+			cfg.HeartbeatInterval,
+			cfg.PlanLeaseTTL,
+			cfg.MaxPlansPerHeartbeat,
+			cfg.AgentCertTTL,
+		)
+		if err := grpcServer.Start(); err != nil {
+			log.Printf("[grpc] Failed to start server: %v", err)
+		} else {
+			log.Printf("[grpc] Server started on %s", grpcServer.Addr())
+			defer func() {
+				if err := grpcServer.Stop(); err != nil {
+					log.Printf("[grpc] Error stopping server: %v", err)
+				}
+			}()
+		}
+	}
 	tlsCfg, err := app.TLSConfig()
 	if err != nil {
 		return err
@@ -132,6 +161,29 @@ func runServe(cfg controlplane.Config) error {
 		log.Printf("HTTP server shutdown error: %v", err)
 	} else {
 		log.Println("HTTP server shutdown complete")
+	}
+
+	// Stop background verifier gracefully
+	var verifierWg sync.WaitGroup
+	verifierWg.Add(1)
+	go func() {
+		defer verifierWg.Done()
+		stopVerifier()
+		log.Println("background verifier stopped")
+	}()
+
+	// Wait for verifier to stop with timeout
+	verifierDone := make(chan struct{})
+	go func() {
+		verifierWg.Wait()
+		close(verifierDone)
+	}()
+
+	select {
+	case <-verifierDone:
+		// Verifier stopped gracefully
+	case <-time.After(5 * time.Second):
+		log.Println("background verifier stop timeout, continuing...")
 	}
 
 	// Close the database repository

@@ -1,0 +1,17 @@
+{
+	"ulid": "01KH4ESMS6QT9B360VWRY5GTDA",
+	"minTime": 1770739201836,
+	"maxTime": 1770746400000,
+	"stats": {
+		"numSamples": 818400,
+		"numSeries": 1705,
+		"numChunks": 6820
+	},
+	"compaction": {
+		"level": 1,
+		"sources": [
+			"01KH4ESMS6QT9B360VWRY5GTDA"
+		]
+	},
+	"version": 1
+}

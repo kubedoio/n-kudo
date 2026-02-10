@@ -11,6 +11,7 @@ import {
   MapPin,
   Globe,
   ChevronRight,
+  FolderOpen,
 } from 'lucide-react';
 import {
   Card,
@@ -48,7 +49,7 @@ const statusMap: Record<string, { variant: 'success' | 'error' | 'warning' | 'in
 };
 
 export function SiteDashboard() {
-  const { tenantId, siteId } = useParams<{ tenantId: string; siteId: string }>();
+  const { projectId, siteId } = useParams<{ projectId: string; siteId: string }>();
   const queryClient = useQueryClient();
   const [activeTab, setActiveTab] = useState<Tab>('vms');
   const [isCreateVMModalOpen, setIsCreateVMModalOpen] = useState(false);
@@ -56,7 +57,7 @@ export function SiteDashboard() {
   const [selectedVM, setSelectedVM] = useState<MicroVM | null>(null);
   const [isVMDetailsOpen, setIsVMDetailsOpen] = useState(false);
 
-  const { data: site, isLoading: isSiteLoading } = useSite(tenantId || '', siteId || '');
+  const { data: site, isLoading: isSiteLoading } = useSite(projectId || '', siteId || '');
   const { data: vms, isLoading: isVMsLoading } = useVMs(siteId || '');
   const { data: hosts, isLoading: isHostsLoading } = useHosts(siteId || '');
   
@@ -403,11 +404,16 @@ export function SiteDashboard() {
     <div className="space-y-6">
       {/* Breadcrumb */}
       <div className="flex items-center gap-2 text-sm text-gray-500">
-        <Link to="/admin/tenants" className="hover:text-gray-700">
-          Tenants
+        <Link to="/projects" className="hover:text-gray-700 flex items-center gap-1">
+          <FolderOpen className="w-4 h-4" />
+          Projects
         </Link>
         <span>/</span>
-        <Link to={`/tenant/${tenantId}/sites`} className="hover:text-gray-700 flex items-center gap-1">
+        <Link to={`/projects/${projectId}`} className="hover:text-gray-700">
+          Project
+        </Link>
+        <span>/</span>
+        <Link to={`/projects/${projectId}/sites`} className="hover:text-gray-700 flex items-center gap-1">
           <ArrowLeft className="w-3 h-3" />
           Sites
         </Link>

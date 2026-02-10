@@ -241,4 +241,4 @@ function Table<T = Record<string, unknown>>({
 }
 
 export { Table };
-export type { Column as TableColumn, SortConfig as TableSortConfig, TableProps };
+export type { Column as TableColumn, SortConfig as TableSortConfig };

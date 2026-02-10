@@ -17,6 +17,10 @@ import {
   getTenant,
   createTenant,
   listTenants,
+  listProjects,
+  getMyProject,
+  getProject,
+  createProject,
   createAPIKey,
   listAPIKeys,
   revokeAPIKey,
@@ -36,6 +40,7 @@ import {
 import {
   // Types
   Tenant,
+  Project,
   Site,
   Host,
   MicroVM,
@@ -43,6 +48,7 @@ import {
   ExecutionLog,
   APIKey,
   CreateTenantRequest,
+  CreateProjectRequest,
   CreateSiteRequest,
   CreateAPIKeyRequest,
   CreateAPIKeyResponse,
@@ -62,6 +68,9 @@ const queryKeys = {
   health: ['health'] as const,
   tenants: ['tenants'] as const,
   tenant: (id: string) => ['tenants', id] as const,
+  projects: ['projects'] as const,
+  project: (id: string) => ['projects', id] as const,
+  myProject: ['my', 'project'] as const,
   sites: (tenantId: string) => ['tenants', tenantId, 'sites'] as const,
   site: (tenantId: string, siteId: string) => ['tenants', tenantId, 'sites', siteId] as const,
   hosts: (siteId: string) => ['sites', siteId, 'hosts'] as const,
@@ -134,6 +143,70 @@ export const useCreateTenant = (
       // Invalidate tenants list
       queryClient.invalidateQueries({ queryKey: queryKeys.tenants });
       // Call user's onSuccess if provided (TanStack Query v5 signature)
+      options?.onSuccess?.(data, variables, context, {} as never);
+    },
+    ...options,
+  });
+};
+
+// ============================================
+// Project Hooks (User-scoped)
+// ============================================
+
+/**
+ * Hook to list all projects for the authenticated user
+ */
+export const useProjects = (options?: UseQueryOptions<Project[], APIErrorResponse>) => {
+  return useQuery<Project[], APIErrorResponse>({
+    queryKey: queryKeys.projects,
+    queryFn: listProjects,
+    ...options,
+  });
+};
+
+/**
+ * Hook to get the current user's project
+ */
+export const useMyProject = (options?: UseQueryOptions<Project, APIErrorResponse>) => {
+  return useQuery<Project, APIErrorResponse>({
+    queryKey: queryKeys.myProject,
+    queryFn: getMyProject,
+    ...options,
+  });
+};
+
+/**
+ * Hook to get a single project by ID
+ * Pass 'current' to get the user's current project
+ */
+export const useProject = (
+  projectId: string,
+  options?: UseQueryOptions<Project, APIErrorResponse>
+) => {
+  const isCurrent = projectId === 'current';
+  
+  return useQuery<Project, APIErrorResponse>({
+    queryKey: isCurrent ? queryKeys.myProject : queryKeys.project(projectId),
+    queryFn: () => isCurrent ? getMyProject() : getProject(projectId),
+    enabled: !!projectId,
+    ...options,
+  });
+};
+
+/**
+ * Hook to create a new project
+ */
+export const useCreateProject = (
+  options?: UseMutationOptions<Project, APIErrorResponse, CreateProjectRequest, unknown>
+) => {
+  const queryClient = useQueryClient();
+
+  return useMutation<Project, APIErrorResponse, CreateProjectRequest, unknown>({
+    mutationFn: createProject,
+    onSuccess: (data, variables, context) => {
+      // Invalidate projects list
+      queryClient.invalidateQueries({ queryKey: queryKeys.projects });
+      // Call user's onSuccess if provided
       options?.onSuccess?.(data, variables, context, {} as never);
     },
     ...options,

@@ -1,0 +1,335 @@
+# Production values for nkudo.
+# This file contains production-ready overrides.
+
+# ==============================================
+# Global Settings
+# ==============================================
+global:
+  imageRegistry: ""
+  storageClass: "fast-ssd"
+
+# ==============================================
+# Image Configuration
+# ==============================================
+image:
+  pullPolicy: IfNotPresent
+
+# ==============================================
+# Deployment Settings
+# ==============================================
+# Run 3 replicas for high availability
+replicaCount: 3
+
+# Pod anti-affinity to spread across nodes
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values:
+                  - nkudo
+              - key: app.kubernetes.io/instance
+                operator: In
+                values:
+                  - {{ .Release.Name }}
+          topologyKey: kubernetes.io/hostname
+
+# Topology spread constraints for zone distribution
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: topology.kubernetes.io/zone
+    whenUnsatisfiable: ScheduleAnyway
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/name: nkudo
+        app.kubernetes.io/instance: {{ .Release.Name }}
+
+# Resource limits for production
+resources:
+  limits:
+    cpu: 2000m
+    memory: 2Gi
+  requests:
+    cpu: 500m
+    memory: 512Mi
+
+# ==============================================
+# Service Configuration
+# ==============================================
+service:
+  type: ClusterIP
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "9091"
+
+# Enable headless service for better internal communication
+headlessService:
+  enabled: true
+
+# ==============================================
+# Ingress Configuration
+# ==============================================
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "100m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+    nginx.ingress.kubernetes.io/rate-limit: "100"
+    nginx.ingress.kubernetes.io/rate-limit-window: "1m"
+  tls:
+    enabled: true
+    secretName: nkudo-tls
+  hosts:
+    - host: api.nkudo.io
+      paths:
+        - path: /
+          pathType: Prefix
+  grpc:
+    enabled: true
+    annotations:
+      cert-manager.io/cluster-issuer: letsencrypt-prod
+      nginx.ingress.kubernetes.io/backend-protocol: "GRPC"
+      nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    hosts:
+      - host: grpc.nkudo.io
+        paths:
+          - path: /
+            pathType: Prefix
+
+# ==============================================
+# Database Configuration
+# ==============================================
+# Use external PostgreSQL for production
+database:
+  type: postgresql
+  external:
+    host: nkudo-postgres.external.svc.cluster.local
+    port: 5432
+    database: nkudo
+    user: nkudo
+    existingSecret: nkudo-db-credentials
+    existingSecretPasswordKey: password
+    sslMode: verify-full
+    maxOpenConns: 50
+    maxIdleConns: 10
+    connMaxLifetime: 1h
+
+# Disable embedded PostgreSQL
+postgresql:
+  enabled: false
+
+# ==============================================
+# Security Settings
+# ==============================================
+security:
+  mtls:
+    enabled: true
+    certValidity: 8760h
+    existingCASecret: nkudo-ca
+  
+  adminKey: ""
+  
+  jwt:
+    expiry: 24h
+
+# ==============================================
+# Persistence
+# ==============================================
+persistence:
+  enabled: true
+  storageClass: "fast-ssd"
+  size: 20Gi
+
+# ==============================================
+# Monitoring & Observability
+# ==============================================
+monitoring:
+  enabled: true
+  
+  serviceMonitor:
+    enabled: true
+    namespace: monitoring
+    interval: 15s
+    scrapeTimeout: 10s
+    labels:
+      release: prometheus
+  
+  prometheusRule:
+    enabled: true
+    namespace: monitoring
+    labels:
+      release: prometheus
+    rules:
+      - alert: NkudoHighErrorRate
+        expr: |
+          (
+            sum(rate(nkudo_http_requests_total{status=~"5.."}[5m]))
+            /
+            sum(rate(nkudo_http_requests_total[5m]))
+          ) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "High error rate detected"
+          description: "Error rate is above 5% for more than 5 minutes"
+      
+      - alert: NkudoHighLatency
+        expr: |
+          histogram_quantile(0.95, 
+            sum(rate(nkudo_http_request_duration_seconds_bucket[5m])) by (le)
+          ) > 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High latency detected"
+          description: "95th percentile latency is above 1 second"
+      
+      - alert: NkudoPodCrashLooping
+        expr: |
+          rate(kube_pod_container_status_restarts_total{container="nkudo"}[15m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Pod is crash looping"
+          description: "Pod {{ $labels.pod }} is restarting frequently"
+  
+  grafana:
+    enabled: true
+    sidecarLabel: grafana_dashboard
+    sidecarLabelValue: "1"
+
+# ==============================================
+# Logging Configuration
+# ==============================================
+logging:
+  level: info
+  format: json
+  requestLogging: true
+
+# ==============================================
+# Backup Configuration
+# ==============================================
+backup:
+  enabled: true
+  schedule: "0 2 * * *"
+  retention: 30
+  
+  s3:
+    enabled: true
+    endpoint: s3.amazonaws.com
+    bucket: nkudo-backups-prod
+    region: us-east-1
+    prefix: "nkudo-backups"
+    existingSecret: nkudo-backup-credentials
+    encryption: true
+  
+  resources:
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+    requests:
+      cpu: 100m
+      memory: 256Mi
+
+# ==============================================
+# Network Policies
+# ==============================================
+networkPolicy:
+  enabled: true
+  
+  ingress:
+    fromNamespaces:
+      - kube-system
+      - ingress-nginx
+    fromCIDR: []
+  
+  egress:
+    toNamespaces:
+      - kube-system
+    allowExternal: true
+
+# ==============================================
+# RBAC Configuration
+# ==============================================
+rbac:
+  create: true
+  serviceAccount:
+    create: true
+    annotations:
+      eks.amazonaws.com/role-arn: arn:aws:iam::123456789:role/nkudo-control-plane
+
+# ==============================================
+# Pod Disruption Budget
+# ==============================================
+pdb:
+  enabled: true
+  minAvailable: "2"
+
+# ==============================================
+# Horizontal Pod Autoscaler
+# ==============================================
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 20
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+  
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Percent
+          value: 10
+          periodSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 15
+        - type: Pods
+          value: 4
+          periodSeconds: 15
+      selectPolicy: Max
+
+# ==============================================
+# Vertical Pod Autoscaler
+# ==============================================
+verticalPodAutoscaler:
+  enabled: true
+  updateMode: Auto
+  resourcePolicy:
+    minAllowed:
+      cpu: 250m
+      memory: 256Mi
+    maxAllowed:
+      cpu: 4000m
+      memory: 4Gi
+    controlledResources:
+      - cpu
+      - memory
+
+# ==============================================
+# Migration Job
+# ==============================================
+migration:
+  enabled: true
+  resources:
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+    requests:
+      cpu: 250m
+      memory: 256Mi

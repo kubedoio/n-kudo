@@ -16,6 +16,16 @@ export interface Tenant {
   created_at: string;
 }
 
+// Project is the user-facing name for Tenant
+export interface Project {
+  id: string;
+  slug: string;
+  name: string;
+  primary_region: string;
+  role: 'OWNER' | 'ADMIN' | 'OPERATOR' | 'VIEWER';
+  created_at: string;
+}
+
 export interface Site {
   id: string;
   tenant_id: string;
@@ -81,6 +91,12 @@ export interface CreateTenantRequest {
   name: string;
   primary_region?: string;
   data_retention_days?: number;
+}
+
+export interface CreateProjectRequest {
+  name: string;
+  slug?: string;
+  primary_region?: string;
 }
 
 export interface CreateSiteRequest {

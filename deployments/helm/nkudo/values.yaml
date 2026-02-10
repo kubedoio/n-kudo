@@ -1,0 +1,637 @@
+# Default values for nkudo.
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+
+# ==============================================
+# Global Settings
+# ==============================================
+global:
+  # -- Global image registry
+  imageRegistry: ""
+  # -- Global image pull secrets
+  imagePullSecrets: []
+  # -- Global storage class
+  storageClass: ""
+  # -- Global node selector
+  nodeSelector: {}
+  # -- Global tolerations
+  tolerations: []
+  # -- Global affinity
+  affinity: {}
+
+# ==============================================
+# Image Configuration
+# ==============================================
+image:
+  # -- Image registry
+  registry: ghcr.io
+  # -- Image repository
+  repository: kubedoio/n-kudo-control-plane
+  # -- Image pull policy
+  pullPolicy: IfNotPresent
+  # -- Image tag (defaults to appVersion)
+  tag: ""
+
+# -- Image pull secrets
+imagePullSecrets: []
+
+# ==============================================
+# Deployment Settings
+# ==============================================
+# -- Number of replicas
+replicaCount: 1
+
+# -- Deployment strategy
+strategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxSurge: 25%
+    maxUnavailable: 0
+
+# -- Pod annotations
+podAnnotations: {}
+
+# -- Pod labels
+podLabels: {}
+
+# -- Pod security context
+podSecurityContext:
+  fsGroup: 1000
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+# -- Container security context
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+
+# -- Resource requests and limits
+resources:
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+  requests:
+    cpu: 100m
+    memory: 256Mi
+
+# -- Node selector
+nodeSelector: {}
+
+# -- Tolerations
+tolerations: []
+
+# -- Affinity rules
+affinity: {}
+
+# -- Topology spread constraints
+topologySpreadConstraints: []
+
+# -- Priority class name
+priorityClassName: ""
+
+# ==============================================
+# Service Configuration
+# ==============================================
+service:
+  # -- Service type
+  type: ClusterIP
+  # -- HTTP port
+  httpPort: 8080
+  # -- gRPC port
+  grpcPort: 9090
+  # -- Metrics port
+  metricsPort: 9091
+  # -- Service annotations
+  annotations: {}
+  # -- Session affinity
+  sessionAffinity: None
+
+# -- Headless service for internal communication
+headlessService:
+  enabled: false
+  annotations: {}
+
+# ==============================================
+# Ingress Configuration
+# ==============================================
+ingress:
+  # -- Enable ingress
+  enabled: false
+  # -- Ingress class name
+  className: nginx
+  # -- Ingress annotations
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "100m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+  # -- TLS configuration
+  tls:
+    enabled: false
+    # -- TLS secret name (if not provided, will be generated)
+    secretName: ""
+    # -- TLS certificate (base64 encoded, if not using cert-manager)
+    certificate: ""
+    # -- TLS key (base64 encoded, if not using cert-manager)
+    key: ""
+  # -- HTTP hosts
+  hosts:
+    - host: nkudo.local
+      paths:
+        - path: /
+          pathType: Prefix
+  # -- gRPC ingress settings
+  grpc:
+    enabled: false
+    annotations:
+      nginx.ingress.kubernetes.io/backend-protocol: "GRPC"
+      nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    hosts: []
+
+# ==============================================
+# Database Configuration
+# ==============================================
+database:
+  # -- Database type (postgresql, sqlite)
+  type: postgresql
+  
+  # -- External PostgreSQL configuration (used when postgresql.enabled=false)
+  external:
+    # -- External database host
+    host: ""
+    # -- External database port
+    port: 5432
+    # -- External database name
+    database: nkudo
+    # -- External database user
+    user: nkudo
+    # -- External database password (will be stored in secret)
+    password: ""
+    # -- Use existing secret for credentials
+    existingSecret: ""
+    # -- Key in existing secret for password
+    existingSecretPasswordKey: password
+    # -- SSL mode (disable, require, verify-ca, verify-full)
+    sslMode: require
+    # -- Connection pool max open connections
+    maxOpenConns: 25
+    # -- Connection pool max idle connections
+    maxIdleConns: 5
+    # -- Connection pool max lifetime
+    connMaxLifetime: 1h
+
+# PostgreSQL subchart configuration
+postgresql:
+  # -- Enable PostgreSQL subchart
+  enabled: true
+  
+  # -- PostgreSQL architecture (standalone or replication)
+  architecture: standalone
+  
+  auth:
+    # -- PostgreSQL username
+    username: nkudo
+    # -- PostgreSQL database name
+    database: nkudo
+    # -- PostgreSQL password (will be generated if not provided)
+    password: ""
+    # -- PostgreSQL postgres password
+    postgresPassword: ""
+    # -- Use existing secret
+    existingSecret: ""
+  
+  primary:
+    # -- PostgreSQL persistence
+    persistence:
+      enabled: true
+      size: 10Gi
+      storageClass: ""
+    
+    # -- PostgreSQL resources
+    resources:
+      limits:
+        cpu: 1000m
+        memory: 1Gi
+      requests:
+        cpu: 250m
+        memory: 256Mi
+    
+    # -- PostgreSQL node selector
+    nodeSelector: {}
+    
+    # -- PostgreSQL tolerations
+    tolerations: []
+    
+    # -- PostgreSQL affinity
+    affinity: {}
+  
+  # -- Read replicas configuration
+  readReplicas:
+    replicaCount: 0
+
+# ==============================================
+# Security Settings
+# ==============================================
+security:
+  # -- Enable mTLS for edge communication
+  mtls:
+    enabled: true
+    # -- CA certificate (base64 encoded, auto-generated if not provided)
+    caCert: ""
+    # -- CA key (base64 encoded, auto-generated if not provided)
+    caKey: ""
+    # -- Certificate validity duration
+    certValidity: 8760h
+    # -- Use existing secret for CA
+    existingCASecret: ""
+    # -- Key in secret for CA cert
+    caCertKey: ca.crt
+    # -- Key in secret for CA key
+    caKeyKey: ca.key
+  
+  # -- Admin API key (auto-generated if not provided)
+  adminKey: ""
+  
+  # -- JWT configuration
+  jwt:
+    # -- JWT secret (auto-generated if not provided)
+    secret: ""
+    # -- JWT token expiry
+    expiry: 24h
+  
+  # -- External secrets configuration
+  externalSecrets:
+    enabled: false
+    secretStore:
+      name: ""
+      kind: SecretStore
+    refreshInterval: 1h
+
+# ==============================================
+# Persistence
+# ==============================================
+persistence:
+  # -- Enable persistence
+  enabled: true
+  # -- Storage class
+  storageClass: ""
+  # -- Access mode
+  accessMode: ReadWriteOnce
+  # -- Storage size
+  size: 5Gi
+  # -- Existing claim
+  existingClaim: ""
+  # -- Annotations
+  annotations: {}
+
+# -- Temporary storage (emptyDir) configuration
+tmpfs:
+  # -- Size limit for tmpfs
+  sizeLimit: 1Gi
+
+# ==============================================
+# Monitoring & Observability
+# ==============================================
+monitoring:
+  # -- Enable Prometheus metrics
+  enabled: false
+  
+  # -- ServiceMonitor configuration
+  serviceMonitor:
+    # -- Enable ServiceMonitor
+    enabled: false
+    # -- Namespace for ServiceMonitor
+    namespace: ""
+    # -- Scrape interval
+    interval: 30s
+    # -- Scrape timeout
+    scrapeTimeout: 10s
+    # -- Additional labels
+    labels: {}
+    # -- Relabelings
+    relabelings: []
+    # -- Metric relabelings
+    metricRelabelings: []
+  
+  # -- PrometheusRule configuration
+  prometheusRule:
+    enabled: false
+    namespace: ""
+    labels: {}
+    rules: []
+  
+  # -- Grafana dashboard
+  grafana:
+    enabled: false
+    # -- Sidecar label for dashboard discovery
+    sidecarLabel: grafana_dashboard
+    # -- Sidecar label value
+    sidecarLabelValue: "1"
+
+# -- Health check configuration
+healthCheck:
+  # -- Startup probe
+  startup:
+    enabled: true
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 30
+  
+  # -- Liveness probe
+  liveness:
+    enabled: true
+    initialDelaySeconds: 30
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+  
+  # -- Readiness probe
+  readiness:
+    enabled: true
+    initialDelaySeconds: 5
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 3
+
+# ==============================================
+# Logging Configuration
+# ==============================================
+logging:
+  # -- Log level (debug, info, warn, error)
+  level: info
+  # -- Log format (json, console)
+  format: json
+  # -- Enable request logging
+  requestLogging: true
+
+# ==============================================
+# Backup Configuration
+# ==============================================
+backup:
+  # -- Enable backup sidecar
+  enabled: false
+  
+  # -- Backup schedule (cron expression)
+  schedule: "0 2 * * *"
+  
+  # -- Backup retention (number of backups)
+  retention: 7
+  
+  # -- S3 backup destination
+  s3:
+    enabled: false
+    # -- S3 endpoint
+    endpoint: ""
+    # -- S3 bucket
+    bucket: ""
+    # -- S3 region
+    region: ""
+    # -- S3 prefix
+    prefix: "nkudo-backups"
+    # -- S3 access key
+    accessKey: ""
+    # -- S3 secret key
+    secretKey: ""
+    # -- Use existing secret for S3 credentials
+    existingSecret: ""
+    # -- Enable S3 encryption
+    encryption: true
+  
+  # -- Backup resources
+  resources:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 50m
+      memory: 128Mi
+
+# ==============================================
+# Network Policies
+# ==============================================
+networkPolicy:
+  # -- Enable network policies
+  enabled: false
+  
+  # -- Ingress rules
+  ingress:
+    # -- Allow from namespaces
+    fromNamespaces: []
+    # -- Allow from pods with labels
+    fromPods: {}
+    # -- Allow from CIDR blocks
+    fromCIDR: []
+  
+  # -- Egress rules
+  egress:
+    # -- Allow to namespaces
+    toNamespaces: []
+    # -- Allow to pods with labels
+    toPods: {}
+    # -- Allow to CIDR blocks
+    toCIDR: []
+    # -- Allow to external (0.0.0.0/0)
+    allowExternal: false
+
+# ==============================================
+# RBAC Configuration
+# ==============================================
+rbac:
+  # -- Create RBAC resources
+  create: true
+  
+  # -- ServiceAccount configuration
+  serviceAccount:
+    # -- Create service account
+    create: true
+    # -- Service account name (defaults to release name)
+    name: ""
+    # -- Service account annotations
+    annotations: {}
+    # -- Service account labels
+    labels: {}
+    # -- Automount service account token
+    automount: true
+  
+  # -- Role rules (additional)
+  rules: []
+
+# ==============================================
+# Pod Disruption Budget
+# ==============================================
+pdb:
+  # -- Enable Pod Disruption Budget
+  enabled: false
+  # -- Min available pods
+  minAvailable: ""
+  # -- Max unavailable pods
+  maxUnavailable: 1
+
+# ==============================================
+# Horizontal Pod Autoscaler
+# ==============================================
+autoscaling:
+  # -- Enable HPA
+  enabled: false
+  # -- Min replicas
+  minReplicas: 2
+  # -- Max replicas
+  maxReplicas: 10
+  # -- Target CPU utilization
+  targetCPUUtilizationPercentage: 80
+  # -- Target memory utilization
+  targetMemoryUtilizationPercentage: 80
+  # -- Custom metrics
+  metrics: []
+  # -- Scaling behavior
+  behavior: {}
+
+# ==============================================
+# Vertical Pod Autoscaler
+# ==============================================
+verticalPodAutoscaler:
+  # -- Enable VPA
+  enabled: false
+  # -- Update mode (Off, Initial, Recreate, Auto)
+  updateMode: Auto
+  # -- Resource policy
+  resourcePolicy:
+    minAllowed:
+      cpu: 50m
+      memory: 128Mi
+    maxAllowed:
+      cpu: 2000m
+      memory: 2Gi
+    controlledResources:
+      - cpu
+      - memory
+
+# ==============================================
+# Extra Configuration
+# ==============================================
+# -- Extra environment variables
+extraEnv: []
+  # - name: CUSTOM_VAR
+  #   value: custom_value
+
+# -- Extra environment variables from secrets/configmaps
+extraEnvFrom: []
+  # - secretRef:
+  #     name: my-secret
+
+# -- Extra volumes
+extraVolumes: []
+  # - name: extra-volume
+  #   emptyDir: {}
+
+# -- Extra volume mounts
+extraVolumeMounts: []
+  # - name: extra-volume
+  #   mountPath: /extra
+
+# -- Extra containers
+extraContainers: []
+
+# -- Extra init containers
+extraInitContainers: []
+
+# -- Extra manifests (useful for sidecars, additional resources)
+extraManifests: []
+
+# ==============================================
+# Configuration & Feature Flags
+# ==============================================
+config:
+  # -- Server configuration
+  server:
+    # -- HTTP bind address
+    httpBind: 0.0.0.0:8080
+    # -- gRPC bind address
+    grpcBind: 0.0.0.0:9090
+    # -- Metrics bind address
+    metricsBind: 0.0.0.0:9091
+    # -- Enable CORS
+    cors:
+      enabled: true
+      allowedOrigins:
+        - "*"
+      allowedMethods:
+        - GET
+        - POST
+        - PUT
+        - DELETE
+        - OPTIONS
+      allowedHeaders:
+        - "*"
+    # -- Request timeout
+    timeout: 30s
+    # -- Max request size
+    maxRequestSize: 100MB
+  
+  # -- VM configuration defaults
+  vm:
+    # -- Default VM namespace
+    defaultNamespace: default
+    # -- Default VM resources
+    defaultResources:
+      cpu: 1
+      memory: 1Gi
+      disk: 10Gi
+    # -- Enable VM snapshots
+    enableSnapshots: true
+    # -- Snapshot retention
+    snapshotRetention: 7
+  
+  # -- Edge configuration
+  edge:
+    # -- Edge heartbeat interval
+    heartbeatInterval: 30s
+    # -- Edge heartbeat timeout
+    heartbeatTimeout: 2m
+    # -- Edge reconnection backoff
+    reconnectBackoff: 5s
+  
+  # -- Feature flags
+  features:
+    # -- Enable audit logging
+    auditLogging: true
+    # -- Enable plan execution
+    planExecution: true
+    # -- Enable auto-enrollment
+    autoEnrollment: false
+    # -- Enable multi-tenancy
+    multiTenancy: false
+
+# ==============================================
+# Migration Job
+# ==============================================
+migration:
+  # -- Run database migrations on startup
+  enabled: true
+  # -- Migration job annotations
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "-1"
+    helm.sh/hook-delete-policy: before-hook-creation
+  # -- Migration resources
+  resources:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi
+  # -- Migration tolerations
+  tolerations: []
+  # -- Migration node selector
+  nodeSelector: {}
+  # -- Migration affinity
+  affinity: {}

@@ -20,6 +20,17 @@ on:
       - 'deployments/**'
       - '.github/workflows/e2e.yml'
   workflow_dispatch:
+    inputs:
+      browser:
+        description: 'Browser to run tests on'
+        required: true
+        default: 'chromium'
+        type: choice
+        options:
+          - chromium
+          - firefox
+          - webkit
+          - all
 
 env:
   GO_VERSION: '1.23'
@@ -27,11 +38,18 @@ env:
   ADMIN_KEY: 'e2e-test-admin-key'
 
 jobs:
+  # ============================================================================
+  # E2E Tests
+  # ============================================================================
   e2e-tests:
-    name: E2E Tests
+    name: E2E Tests (${{ matrix.browser }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    
+    strategy:
+      matrix:
+        browser: [chromium]
+      fail-fast: false
+
     defaults:
       run:
         working-directory: ./frontend
@@ -44,6 +62,7 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
+          cache: true
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -55,13 +74,38 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        id: playwright-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}
+
       - name: Install Playwright browsers
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
         run: npx playwright install --with-deps chromium firefox webkit
+
+      - name: Install Playwright deps (cached)
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        run: npx playwright install-deps chromium firefox webkit
 
       - name: Build control-plane binary
         run: |
           cd ..
           go build -o bin/control-plane ./cmd/control-plane
+
+      - name: Cache Docker layers
+        uses: actions/cache@v4
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-docker-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-docker-
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: image=moby/buildkit:master
 
       - name: Start services (docker compose)
         run: |
@@ -103,13 +147,18 @@ jobs:
         env:
           API_BASE_URL: https://localhost:8443
           ADMIN_KEY: ${{ env.ADMIN_KEY }}
-        run: npx playwright test
+        run: |
+          if [ "${{ github.event.inputs.browser }}" = "all" ]; then
+            npx playwright test
+          else
+            npx playwright test --project=${{ github.event.inputs.browser || matrix.browser }}
+          fi
 
       - name: Upload Playwright report
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: playwright-report
+          name: playwright-report-${{ matrix.browser }}
           path: frontend/playwright-report/
           retention-days: 7
 
@@ -117,7 +166,7 @@ jobs:
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: test-results
+          name: test-results-${{ matrix.browser }}
           path: frontend/test-results/
           retention-days: 7
 
@@ -125,8 +174,16 @@ jobs:
         uses: actions/upload-artifact@v4
         if: failure()
         with:
-          name: failure-screenshots
+          name: failure-screenshots-${{ matrix.browser }}
           path: frontend/test-results/**/*.png
+          retention-days: 7
+
+      - name: Upload videos on failure
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: failure-videos-${{ matrix.browser }}
+          path: frontend/test-results/**/*.webm
           retention-days: 7
 
       - name: Cleanup services
@@ -136,6 +193,9 @@ jobs:
           docker compose down -v
           docker volume prune -f
 
+  # ============================================================================
+  # E2E Tests Summary
+  # ============================================================================
   e2e-tests-summary:
     name: E2E Tests Summary
     runs-on: ubuntu-latest
@@ -149,4 +209,44 @@ jobs:
           else
             echo "❌ E2E tests failed!"
             exit 1
+          fi
+
+      - name: Post PR comment
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const result = '${{ needs.e2e-tests.result }}';
+            const body = `## E2E Test Results
+            
+            ${result === 'success' ? '✅ E2E tests passed!' : '❌ E2E tests failed!'}
+            
+            Check the [workflow run](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details.
+            `;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });
+
+      - name: Notify on failure
+        if: failure()
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          MESSAGE="❌ E2E tests failed! Check https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          
+          if [ -n "$SLACK_WEBHOOK_URL" ]; then
+            curl -X POST -H 'Content-type: application/json' \
+              --data "{\"text\":\"${MESSAGE}\"}" \
+              $SLACK_WEBHOOK_URL || true
+          fi
+          
+          if [ -n "$DISCORD_WEBHOOK_URL" ]; then
+            curl -X POST -H 'Content-type: application/json' \
+              --data "{\"content\":\"${MESSAGE}\"}" \
+              $DISCORD_WEBHOOK_URL || true
           fi

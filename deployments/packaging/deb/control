@@ -1,0 +1,9 @@
+Package: nkudo-edge
+Version: {{VERSION}}
+Section: admin
+Priority: optional
+Architecture: {{ARCH}}
+Depends: systemd
+Maintainer: n-kudo maintainers <maintainers@nkudo.io>
+Description: n-kudo edge agent
+ MicroVM orchestration edge agent for n-kudo control plane.

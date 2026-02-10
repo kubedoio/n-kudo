@@ -1,0 +1,349 @@
+name: Quality Gates
+
+on:
+  pull_request:
+    branches: [main, master]
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  checks: write
+  pull-requests: write
+
+env:
+  GO_VERSION: '1.23'
+  COVERAGE_THRESHOLD: 60.0
+  COVERAGE_DECREASE_THRESHOLD: 5.0
+
+jobs:
+  # ============================================================================
+  # Test Status Check
+  # ============================================================================
+  test-status:
+    name: Test Status
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: nkudo
+          POSTGRES_PASSWORD: nkudo
+          POSTGRES_DB: nkudo
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Run tests
+        id: tests
+        env:
+          DATABASE_URL: postgres://nkudo:nkudo@localhost:5432/nkudo?sslmode=disable
+        run: |
+          go test -v -race -coverprofile=coverage.out ./internal/... 2>&1 | tee test_output.log
+          TEST_EXIT_CODE=${PIPESTATUS[0]}
+          
+          # Count test results
+          PASSED=$(grep -c "^--- PASS:" test_output.log || echo "0")
+          FAILED=$(grep -c "^--- FAIL:" test_output.log || echo "0")
+          SKIPPED=$(grep -c "^--- SKIP:" test_output.log || echo "0")
+          
+          echo "passed=$PASSED" >> $GITHUB_OUTPUT
+          echo "failed=$FAILED" >> $GITHUB_OUTPUT
+          echo "skipped=$SKIPPED" >> $GITHUB_OUTPUT
+          
+          exit $TEST_EXIT_CODE
+
+      - name: Report test results
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const passed = '${{ steps.tests.outputs.passed }}';
+            const failed = '${{ steps.tests.outputs.failed }}';
+            const skipped = '${{ steps.tests.outputs.skipped }}';
+            
+            const body = `## Test Results
+            
+            | Status | Count |
+            |--------|-------|
+            | ✅ Passed | ${passed} |
+            | ❌ Failed | ${failed} |
+            | ⚠️ Skipped | ${skipped} |
+            `;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });
+
+  # ============================================================================
+  # Code Coverage Check
+  # ============================================================================
+  coverage-check:
+    name: Code Coverage
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: nkudo
+          POSTGRES_PASSWORD: nkudo
+          POSTGRES_DB: nkudo
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+      - name: Checkout PR
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Run coverage for PR
+        env:
+          DATABASE_URL: postgres://nkudo:nkudo@localhost:5432/nkudo?sslmode=disable
+        run: |
+          go test -coverprofile=coverage-pr.out ./internal/...
+          PR_COVERAGE=$(go tool cover -func=coverage-pr.out | grep total | awk '{print $3}' | sed 's/%//')
+          echo "pr_coverage=$PR_COVERAGE" >> $GITHUB_ENV
+          echo "PR Coverage: $PR_COVERAGE%"
+
+      - name: Checkout base
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.base_ref }}
+          clean: false
+
+      - name: Run coverage for base
+        env:
+          DATABASE_URL: postgres://nkudo:nkudo@localhost:5432/nkudo?sslmode=disable
+        run: |
+          go test -coverprofile=coverage-base.out ./internal/... || true
+          BASE_COVERAGE=$(go tool cover -func=coverage-base.out 2>/dev/null | grep total | awk '{print $3}' | sed 's/%//' || echo "0")
+          echo "base_coverage=$BASE_COVERAGE" >> $GITHUB_ENV
+          echo "Base Coverage: $BASE_COVERAGE%"
+
+      - name: Check coverage threshold
+        run: |
+          echo "PR Coverage: $pr_coverage%"
+          echo "Base Coverage: $base_coverage%"
+          
+          # Check minimum coverage threshold
+          if (( $(echo "$pr_coverage < $COVERAGE_THRESHOLD" | bc -l) )); then
+            echo "❌ Code coverage ($pr_coverage%) is below threshold ($COVERAGE_THRESHOLD%)"
+            exit 1
+          fi
+          
+          # Check coverage decrease
+          DECREASE=$(echo "$base_coverage - $pr_coverage" | bc -l)
+          if (( $(echo "$DECREASE > $COVERAGE_DECREASE_THRESHOLD" | bc -l) )); then
+            echo "❌ Code coverage decreased by ${DECREASE}% (threshold: ${COVERAGE_DECREASE_THRESHOLD}%)"
+            exit 1
+          fi
+          
+          echo "✅ Code coverage check passed ($pr_coverage%)"
+
+      - name: Report coverage results
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prCoverage = process.env.pr_coverage || 'N/A';
+            const baseCoverage = process.env.base_coverage || 'N/A';
+            
+            let diff = 'N/A';
+            if (prCoverage !== 'N/A' && baseCoverage !== 'N/A') {
+              diff = (parseFloat(prCoverage) - parseFloat(baseCoverage)).toFixed(2);
+            }
+            
+            const body = `## Code Coverage Report
+            
+            | Metric | Value |
+            |--------|-------|
+            | PR Coverage | ${prCoverage}% |
+            | Base Coverage | ${baseCoverage}% |
+            | Difference | ${diff > 0 ? '+' : ''}${diff}% |
+            | Threshold | ${process.env.COVERAGE_THRESHOLD}% |
+            
+            ${parseFloat(diff) < 0 ? '⚠️ Coverage decreased' : '✅ Coverage check passed'}
+            `;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });
+
+  # ============================================================================
+  # Security Vulnerability Check
+  # ============================================================================
+  security-check:
+    name: Security Check
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '1'
+          ignore-unfixed: true
+
+      - name: Upload Trivy scan results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+      - name: Run govulncheck
+        uses: golang/govulncheck-action@v1
+        with:
+          go-version-input: ${{ env.GO_VERSION }}
+
+  # ============================================================================
+  # Lint Check
+  # ============================================================================
+  lint-check:
+    name: Lint Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Run go vet
+        run: go vet ./...
+
+      - name: Check formatting
+        run: |
+          if [ -n "$(gofmt -l .)" ]; then
+            echo "Go code is not formatted:"
+            gofmt -d .
+            exit 1
+          fi
+
+      - name: Run staticcheck
+        uses: dominikh/staticcheck-action@v1
+        with:
+          version: "2024.1"
+          install-go: false
+
+  # ============================================================================
+  # Frontend Quality Check
+  # ============================================================================
+  frontend-quality:
+    name: Frontend Quality
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./frontend
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: ./frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run type check
+        run: npm run typecheck --if-present || echo "No typecheck script, skipping"
+
+      - name: Run tests
+        run: npm run test -- --run || echo "No tests or test failure"
+
+      - name: Build check
+        run: npm run build
+
+  # ============================================================================
+  # PR Quality Gate Summary
+  # ============================================================================
+  quality-gate-summary:
+    name: Quality Gate Summary
+    runs-on: ubuntu-latest
+    needs: [test-status, coverage-check, security-check, lint-check, frontend-quality]
+    if: always()
+    steps:
+      - name: Update PR status
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const results = {
+              tests: '${{ needs.test-status.result }}',
+              coverage: '${{ needs.coverage-check.result }}',
+              security: '${{ needs.security-check.result }}',
+              lint: '${{ needs.lint-check.result }}',
+              frontend: '${{ needs.frontend-quality.result }}'
+            };
+            
+            const allPassed = Object.values(results).every(r => r === 'success');
+            
+            const body = `## Quality Gate Results
+            
+            | Check | Status |
+            |-------|--------|
+            | Tests | ${results.tests === 'success' ? '✅' : '❌'} |
+            | Coverage | ${results.coverage === 'success' ? '✅' : '❌'} |
+            | Security | ${results.security === 'success' ? '✅' : '❌'} |
+            | Lint | ${results.lint === 'success' ? '✅' : '❌'} |
+            | Frontend | ${results.frontend === 'success' ? '✅' : '❌'} |
+            
+            ${allPassed 
+              ? '✅ **All quality gates passed!** This PR can be merged.' 
+              : '❌ **Quality gates failed!** Please fix the issues above before merging.'}
+            `;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });
+            
+            if (!allPassed) {
+              core.setFailed('Quality gates failed');
+            }

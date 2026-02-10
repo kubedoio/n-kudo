@@ -119,6 +119,77 @@ func (m *mockRepo) Close() error { return nil }
 func (m *mockRepo) GetTenantLimits(ctx context.Context, tenantID string) (*store.QuotaLimits, error) { return &store.QuotaLimits{}, nil }
 func (m *mockRepo) SetTenantLimits(ctx context.Context, tenantID string, limits store.QuotaLimits) error { return nil }
 func (m *mockRepo) GetTenantUsage(ctx context.Context, tenantID string) (*store.TenantUsage, error) { return &store.TenantUsage{}, nil }
+func (m *mockRepo) ListTenants(ctx context.Context) ([]store.Tenant, error) { return nil, nil }
+func (m *mockRepo) GetTenantByID(ctx context.Context, tenantID string) (store.Tenant, error) { return store.Tenant{}, nil }
+func (m *mockRepo) CreateUser(ctx context.Context, user store.User) (store.User, error) { return user, nil }
+func (m *mockRepo) GetUserByEmail(ctx context.Context, email string) (store.User, error) { return store.User{}, nil }
+func (m *mockRepo) GetUserByEmailAndTenant(ctx context.Context, email, tenantID string) (store.User, error) { return store.User{}, nil }
+func (m *mockRepo) GetUserByID(ctx context.Context, tenantID, userID string) (store.User, error) { return store.User{}, nil }
+func (m *mockRepo) UpdateUserLastLogin(ctx context.Context, tenantID, userID string) error { return nil }
+func (m *mockRepo) UpdateUserPassword(ctx context.Context, tenantID, userID, passwordHash string) error { return nil }
+func (m *mockRepo) EmailExists(ctx context.Context, email string) (bool, error) { return false, nil }
+func (m *mockRepo) CreateEmailVerificationToken(ctx context.Context, userID, tenantID, tokenHash string, expiresAt time.Time) error { return nil }
+func (m *mockRepo) VerifyEmailToken(ctx context.Context, tokenHash string) (userID, tenantID string, err error) { return "", "", nil }
+func (m *mockRepo) MarkEmailVerified(ctx context.Context, tenantID, userID string) error { return nil }
+func (m *mockRepo) CreateInvitation(ctx context.Context, invitation store.ProjectInvitation) error { return nil }
+func (m *mockRepo) GetInvitationByToken(ctx context.Context, tokenHash string) (*store.ProjectInvitation, error) { return nil, nil }
+func (m *mockRepo) ListPendingInvitations(ctx context.Context, tenantID string) ([]store.ProjectInvitation, error) { return nil, nil }
+func (m *mockRepo) ListUserInvitations(ctx context.Context, email string) ([]store.ProjectInvitationWithProject, error) { return nil, nil }
+func (m *mockRepo) AcceptInvitation(ctx context.Context, invitationID, userID string) error { return nil }
+func (m *mockRepo) DeclineInvitation(ctx context.Context, invitationID string) error { return nil }
+func (m *mockRepo) CancelInvitation(ctx context.Context, tenantID, invitationID string) error { return nil }
+func (m *mockRepo) GetInvitationByID(ctx context.Context, tenantID, invitationID string) (*store.ProjectInvitation, error) { return nil, nil }
+
+// VXLAN network methods (stub implementations for testing)
+func (m *mockRepo) CreateVXLANNetwork(ctx context.Context, tenantID, siteID string, network store.VXLANNetwork) (store.VXLANNetwork, error) {
+	return network, nil
+}
+func (m *mockRepo) ListVXLANNetworks(ctx context.Context, tenantID, siteID string) ([]store.VXLANNetwork, error) {
+	return nil, nil
+}
+func (m *mockRepo) GetVXLANNetwork(ctx context.Context, tenantID, networkID string) (store.VXLANNetwork, error) {
+	return store.VXLANNetwork{}, nil
+}
+func (m *mockRepo) GetVXLANNetworkByVNI(ctx context.Context, tenantID string, vni int) (store.VXLANNetwork, error) {
+	return store.VXLANNetwork{}, nil
+}
+func (m *mockRepo) DeleteVXLANNetwork(ctx context.Context, tenantID, networkID string) error {
+	return nil
+}
+func (m *mockRepo) VXLANNetworkBelongsToTenant(ctx context.Context, networkID, tenantID string) (bool, error) {
+	return false, nil
+}
+
+// VXLAN tunnel methods (stub implementations for testing)
+func (m *mockRepo) CreateVXLANTunnel(ctx context.Context, tunnel store.VXLANTunnel) (store.VXLANTunnel, error) {
+	return tunnel, nil
+}
+func (m *mockRepo) ListVXLANTunnels(ctx context.Context, networkID string) ([]store.VXLANTunnel, error) {
+	return nil, nil
+}
+func (m *mockRepo) GetVXLANTunnel(ctx context.Context, networkID, hostID string) (store.VXLANTunnel, error) {
+	return store.VXLANTunnel{}, nil
+}
+func (m *mockRepo) UpdateVXLANTunnelStatus(ctx context.Context, tunnelID string, status string) error {
+	return nil
+}
+func (m *mockRepo) DeleteVXLANTunnel(ctx context.Context, tunnelID string) error {
+	return nil
+}
+
+// VM network attachment methods (stub implementations for testing)
+func (m *mockRepo) AttachVMToNetwork(ctx context.Context, attachment store.VMNetworkAttachment) (store.VMNetworkAttachment, error) {
+	return attachment, nil
+}
+func (m *mockRepo) DetachVMFromNetwork(ctx context.Context, vmID, networkID string) error {
+	return nil
+}
+func (m *mockRepo) ListVMNetworkAttachments(ctx context.Context, vmID string) ([]store.VMNetworkAttachment, error) {
+	return nil, nil
+}
+func (m *mockRepo) ListNetworkVMAttachments(ctx context.Context, networkID string) ([]store.VMNetworkAttachment, error) {
+	return nil, nil
+}
 
 func TestNewChainManager(t *testing.T) {
 	repo := newMockRepo()

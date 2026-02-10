@@ -8,7 +8,7 @@ describe('useApplyPlan', () => {
     const onSuccess = vi.fn()
     const { result } = renderHook(
       () => useApplyPlan({
-        onSuccess: (data, variables, context) => {
+        onSuccess: (data) => {
           onSuccess(data)
         }
       }),
@@ -39,7 +39,7 @@ describe('useApplyPlanFromActions', () => {
     const onSuccess = vi.fn()
     const { result } = renderHook(
       () => useApplyPlanFromActions({
-        onSuccess: (data, variables, context) => {
+        onSuccess: (data) => {
           onSuccess(data)
         }
       }),

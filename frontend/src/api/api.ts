@@ -100,6 +100,66 @@ export const getTenant = async (tenantId: string): Promise<Tenant> => {
 };
 
 // ============================================
+// Projects (User-scoped)
+// ============================================
+
+import { Project, CreateProjectRequest } from './types';
+
+/**
+ * List all projects for the authenticated user
+ * @returns Array of projects
+ */
+export const listProjects = async (): Promise<Project[]> => {
+  try {
+    const response = await apiClient.get<{ projects: Project[] }>('/projects');
+    return response.data.projects;
+  } catch (error) {
+    throw handleAPIError(error);
+  }
+};
+
+/**
+ * Get the current user's project
+ * @returns Current project
+ */
+export const getMyProject = async (): Promise<Project> => {
+  try {
+    const response = await apiClient.get<Project>('/my/project');
+    return response.data;
+  } catch (error) {
+    throw handleAPIError(error);
+  }
+};
+
+/**
+ * Get a project by ID
+ * @param projectId - Project UUID
+ * @returns Project
+ */
+export const getProject = async (projectId: string): Promise<Project> => {
+  try {
+    const response = await apiClient.get<Project>(`/projects/${projectId}`);
+    return response.data;
+  } catch (error) {
+    throw handleAPIError(error);
+  }
+};
+
+/**
+ * Create a new project
+ * @param data - Project creation data
+ * @returns Created project
+ */
+export const createProject = async (data: CreateProjectRequest): Promise<Project> => {
+  try {
+    const response = await apiClient.post<Project>('/projects', data);
+    return response.data;
+  } catch (error) {
+    throw handleAPIError(error);
+  }
+};
+
+// ============================================
 // API Keys
 // ============================================
 

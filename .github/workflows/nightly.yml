@@ -1,0 +1,285 @@
+name: Nightly Build
+
+on:
+  schedule:
+    # Run at 2:00 AM UTC daily
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch to build from'
+        required: true
+        default: 'main'
+
+env:
+  GO_VERSION: '1.23'
+  NODE_VERSION: '20'
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # ============================================================================
+  # Build Nightly Binaries
+  # ============================================================================
+  build-binaries:
+    name: Build Nightly Binaries
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            binary: nkudo-edge-linux-amd64
+          - goos: linux
+            goarch: arm64
+            binary: nkudo-edge-linux-arm64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.branch || 'main' }}
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Get nightly version
+        id: version
+        run: |
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          DATE=$(date +%Y%m%d)
+          echo "version=nightly-${DATE}-${SHORT_SHA}" >> $GITHUB_OUTPUT
+
+      - name: Build edge agent
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          go build -trimpath \
+            -ldflags "-s -w -X main.version=${{ steps.version.outputs.version }}" \
+            -o dist/${{ matrix.binary }} \
+            ./cmd/edge
+
+      - name: Create tarball
+        run: |
+          cd dist
+          tar czf ${{ matrix.binary }}-nightly.tar.gz ${{ matrix.binary }}
+
+      - name: Generate checksum
+        run: |
+          cd dist
+          sha256sum ${{ matrix.binary }}-nightly.tar.gz > ${{ matrix.binary }}-nightly.tar.gz.sha256
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.binary }}-nightly
+          path: |
+            dist/*-nightly.tar.gz
+            dist/*-nightly.tar.gz.sha256
+
+  # ============================================================================
+  # Extended Tests
+  # ============================================================================
+  extended-tests:
+    name: Extended Tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: nkudo
+          POSTGRES_PASSWORD: nkudo
+          POSTGRES_DB: nkudo
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.branch || 'main' }}
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Run all tests with race detector
+        env:
+          DATABASE_URL: postgres://nkudo:nkudo@localhost:5432/nkudo?sslmode=disable
+        run: go test -v -race -count=3 ./...
+
+      - name: Run benchmarks
+        run: go test -bench=. -benchtime=30s ./...
+
+      - name: Run integration tests (extended)
+        env:
+          DATABASE_URL: postgres://nkudo:nkudo@localhost:5432/nkudo?sslmode=disable
+        run: |
+          go test -v -race -count=3 ./tests/integration/...
+
+  # ============================================================================
+  # Build and Push Nightly Docker Images
+  # ============================================================================
+  docker-nightly:
+    name: Nightly Docker Images
+    runs-on: ubuntu-latest
+    needs: [build-binaries]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.branch || 'main' }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Get nightly version
+        id: version
+        run: |
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          DATE=$(date +%Y%m%d)
+          echo "version=nightly-${DATE}-${SHORT_SHA}" >> $GITHUB_OUTPUT
+          echo "date=${DATE}" >> $GITHUB_OUTPUT
+
+      - name: Build and push control-plane nightly image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./deployments/docker/Dockerfile.control-plane
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/control-plane:nightly
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/control-plane:nightly-${{ steps.version.outputs.date }}
+          cache-from: type=gha,scope=control-plane-nightly
+          cache-to: type=gha,mode=max,scope=control-plane-nightly
+
+      - name: Build and push frontend nightly image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./frontend
+          file: ./deployments/docker/Dockerfile.frontend
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/frontend:nightly
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/frontend:nightly-${{ steps.version.outputs.date }}
+          cache-from: type=gha,scope=frontend-nightly
+          cache-to: type=gha,mode=max,scope=frontend-nightly
+
+  # ============================================================================
+  # Cleanup Old Nightly Images
+  # ============================================================================
+  cleanup-nightly:
+    name: Cleanup Old Nightly Images
+    runs-on: ubuntu-latest
+    needs: [docker-nightly]
+    steps:
+      - name: Delete old nightly container images
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const daysToKeep = 7;
+            const cutoffDate = new Date();
+            cutoffDate.setDate(cutoffDate.getDate() - daysToKeep);
+            
+            const images = ['control-plane', 'frontend'];
+            
+            for (const image of images) {
+              try {
+                const { data: versions } = await github.rest.packages.getAllPackageVersionsForPackageOwnedByOrg({
+                  package_type: 'container',
+                  package_name: `${context.repo.owner}/${context.repo.repo}/${image}`,
+                  org: context.repo.owner,
+                });
+                
+                for (const version of versions) {
+                  const isNightly = version.metadata?.container?.tags?.some(tag => tag.startsWith('nightly-'));
+                  const versionDate = new Date(version.created_at);
+                  
+                  if (isNightly && versionDate < cutoffDate) {
+                    console.log(`Deleting ${image}:${version.metadata.container.tags.join(', ')}`);
+                    await github.rest.packages.deletePackageVersionForOrg({
+                      package_type: 'container',
+                      package_name: `${context.repo.owner}/${context.repo.repo}/${image}`,
+                      org: context.repo.owner,
+                      package_version_id: version.id,
+                    });
+                  }
+                }
+              } catch (error) {
+                console.log(`Error processing ${image}: ${error.message}`);
+              }
+            }
+
+  # ============================================================================
+  # Nightly Summary
+  # ============================================================================
+  nightly-summary:
+    name: Nightly Summary
+    runs-on: ubuntu-latest
+    needs: [build-binaries, extended-tests, docker-nightly, cleanup-nightly]
+    if: always()
+    steps:
+      - name: Summarize nightly build
+        run: |
+          echo "## Nightly Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Job | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Build Binaries | ${{ needs.build-binaries.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Extended Tests | ${{ needs.extended-tests.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Docker Nightly | ${{ needs.docker-nightly.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Cleanup | ${{ needs.cleanup-nightly.result }} |" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ needs.build-binaries.result }}" == "success" ] && \
+             [ "${{ needs.extended-tests.result }}" == "success" ] && \
+             [ "${{ needs.docker-nightly.result }}" == "success" ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "✅ **Nightly build successful!**" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Images:" >> $GITHUB_STEP_SUMMARY
+            echo "- \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/control-plane:nightly\`" >> $GITHUB_STEP_SUMMARY
+            echo "- \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/frontend:nightly\`" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "❌ **Nightly build had failures!**" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Notify on failure
+        if: failure()
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          MESSAGE="❌ Nightly build failed! Check https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          
+          if [ -n "$SLACK_WEBHOOK_URL" ]; then
+            curl -X POST -H 'Content-type: application/json' \
+              --data "{\"text\":\"${MESSAGE}\"}" \
+              $SLACK_WEBHOOK_URL || true
+          fi
+          
+          if [ -n "$DISCORD_WEBHOOK_URL" ]; then
+            curl -X POST -H 'Content-type: application/json' \
+              --data "{\"content\":\"${MESSAGE}\"}" \
+              $DISCORD_WEBHOOK_URL || true
+          fi

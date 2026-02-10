@@ -20,15 +20,52 @@ type Identity struct {
 	SavedAt      time.Time `json:"saved_at"`
 }
 
+// NetworkConfig represents a stored network interface configuration
+type NetworkConfig struct {
+	ID      string `json:"id"`       // Interface ID, e.g., "eth0"
+	TapName string `json:"tap_name"` // TAP device name
+	MacAddr string `json:"mac"`      // MAC address
+	IPAddr  string `json:"ip_addr"`  // IP address in CIDR notation
+	Bridge  string `json:"bridge"`   // Bridge name
+}
+
 type MicroVM struct {
-	ID         string    `json:"id"`
-	Name       string    `json:"name"`
-	KernelPath string    `json:"kernel_path"`
-	RootfsPath string    `json:"rootfs_path"`
-	TapIface   string    `json:"tap_iface"`
-	CHPID      int       `json:"ch_pid"`
-	Status     string    `json:"status"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	ID         string          `json:"id"`
+	Name       string          `json:"name"`
+	KernelPath string          `json:"kernel_path"`
+	RootfsPath string          `json:"rootfs_path"`
+	TapIface   string          `json:"tap_iface"` // Deprecated: use Networks instead
+	Networks   []NetworkConfig `json:"networks,omitempty"` // Multiple network interfaces
+	CHPID      int             `json:"ch_pid"`
+	Status     string          `json:"status"`
+	UpdatedAt  time.Time       `json:"updated_at"`
+}
+
+// GetNetworks returns the list of network configurations for the VM.
+// If Networks is empty, it falls back to the deprecated TapIface field.
+func (vm MicroVM) GetNetworks() []NetworkConfig {
+	if len(vm.Networks) > 0 {
+		return vm.Networks
+	}
+	// Backward compatibility: create a single network from TapIface
+	if vm.TapIface != "" {
+		return []NetworkConfig{
+			{
+				ID:      "eth0",
+				TapName: vm.TapIface,
+			},
+		}
+	}
+	return nil
+}
+
+// PrimaryNetwork returns the primary (first) network configuration, or nil if none.
+func (vm MicroVM) PrimaryNetwork() *NetworkConfig {
+	networks := vm.GetNetworks()
+	if len(networks) > 0 {
+		return &networks[0]
+	}
+	return nil
 }
 
 type ActionRecord struct {

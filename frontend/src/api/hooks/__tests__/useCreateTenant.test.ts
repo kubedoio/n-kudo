@@ -8,7 +8,7 @@ describe('useCreateTenant', () => {
     const onSuccess = vi.fn()
     const { result } = renderHook(
       () => useCreateTenant({
-        onSuccess: (data, variables, context) => {
+        onSuccess: (data) => {
           onSuccess(data)
         }
       }),

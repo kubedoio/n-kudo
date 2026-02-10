@@ -1,0 +1,17 @@
+{
+	"ulid": "01KH47XXH67BZNHBVCSBC7DM1E",
+	"minTime": 1770732001836,
+	"maxTime": 1770739200000,
+	"stats": {
+		"numSamples": 818400,
+		"numSeries": 1705,
+		"numChunks": 6820
+	},
+	"compaction": {
+		"level": 1,
+		"sources": [
+			"01KH47XXH67BZNHBVCSBC7DM1E"
+		]
+	},
+	"version": 1
+}

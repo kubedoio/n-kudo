@@ -5,9 +5,11 @@
 
 import axios, { AxiosInstance, AxiosError, InternalAxiosRequestConfig } from 'axios';
 
-// API Key storage keys
+// Storage keys
 const API_KEY_STORAGE_KEY = 'n-kudo-api-key';
 const ADMIN_KEY_STORAGE_KEY = 'n-kudo-admin-key';
+const JWT_TOKEN_KEY = 'n-kudo-jwt-token';
+const USER_INFO_KEY = 'n-kudo-user-info';
 
 // Get base URL from environment variable or use default
 const getBaseURL = (): string => {
@@ -29,6 +31,14 @@ export const apiClient: AxiosInstance = axios.create({
 
 apiClient.interceptors.request.use(
   (config: InternalAxiosRequestConfig): InternalAxiosRequestConfig => {
+    // Skip if no URL
+    if (!config.url) return config;
+
+    // Public endpoints that don't need auth
+    const publicEndpoints = ['/auth/register', '/auth/login', '/healthz', '/readyz', '/metrics'];
+    const isPublic = publicEndpoints.some(endpoint => config.url?.includes(endpoint));
+    if (isPublic) return config;
+
     // Check if this is an admin endpoint
     const isAdminEndpoint = config.url?.startsWith('/tenants') && 
                            (config.method === 'post' || config.url.includes('/api-keys'));
@@ -40,10 +50,16 @@ apiClient.interceptors.request.use(
         config.headers['X-Admin-Key'] = adminKey;
       }
     } else {
-      // Use API key for tenant-scoped endpoints
-      const apiKey = localStorage.getItem(API_KEY_STORAGE_KEY);
-      if (apiKey) {
-        config.headers['X-API-Key'] = apiKey;
+      // Try JWT token first (for user auth)
+      const jwtToken = localStorage.getItem(JWT_TOKEN_KEY);
+      if (jwtToken) {
+        config.headers['Authorization'] = `Bearer ${jwtToken}`;
+      } else {
+        // Fall back to API key
+        const apiKey = localStorage.getItem(API_KEY_STORAGE_KEY);
+        if (apiKey) {
+          config.headers['X-API-Key'] = apiKey;
+        }
       }
     }
 
@@ -103,6 +119,103 @@ apiClient.interceptors.response.use(
     return Promise.reject(error);
   }
 );
+
+// User info type
+export interface UserInfo {
+  id: string;
+  email: string;
+  display_name: string;
+  role: string;
+  last_login_at?: string;
+  email_verified?: boolean;
+}
+
+export interface TenantInfo {
+  id: string;
+  slug: string;
+  name: string;
+  primary_region: string;
+}
+
+export interface AuthResponse {
+  token: string;
+  expires_at: string;
+  user: UserInfo;
+  tenant: TenantInfo;
+}
+
+// ============================================
+// JWT Token & User Auth Management
+// ============================================
+
+export const authStorage = {
+  /**
+   * Store JWT token
+   */
+  setToken(token: string): void {
+    localStorage.setItem(JWT_TOKEN_KEY, token);
+  },
+
+  /**
+   * Get JWT token
+   */
+  getToken(): string | null {
+    return localStorage.getItem(JWT_TOKEN_KEY);
+  },
+
+  /**
+   * Remove JWT token
+   */
+  removeToken(): void {
+    localStorage.removeItem(JWT_TOKEN_KEY);
+  },
+
+  /**
+   * Store user info
+   */
+  setUserInfo(user: UserInfo): void {
+    localStorage.setItem(USER_INFO_KEY, JSON.stringify(user));
+  },
+
+  /**
+   * Get user info
+   */
+  getUserInfo(): UserInfo | null {
+    const data = localStorage.getItem(USER_INFO_KEY);
+    if (data) {
+      try {
+        return JSON.parse(data);
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  },
+
+  /**
+   * Remove user info
+   */
+  removeUserInfo(): void {
+    localStorage.removeItem(USER_INFO_KEY);
+  },
+
+  /**
+   * Check if user is authenticated
+   */
+  isAuthenticated(): boolean {
+    return !!localStorage.getItem(JWT_TOKEN_KEY);
+  },
+
+  /**
+   * Clear all auth data (logout)
+   */
+  logout(): void {
+    localStorage.removeItem(JWT_TOKEN_KEY);
+    localStorage.removeItem(USER_INFO_KEY);
+    localStorage.removeItem(API_KEY_STORAGE_KEY);
+    localStorage.removeItem(ADMIN_KEY_STORAGE_KEY);
+  },
+};
 
 // ============================================
 // API Key Management

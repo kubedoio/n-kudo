@@ -1,0 +1,77 @@
+{{- if .Values.ingress.enabled -}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "nkudo.fullname" . }}
+  labels:
+    {{- include "nkudo.labels" . | nindent 4 }}
+  annotations:
+    {{- toYaml .Values.ingress.annotations | nindent 4 }}
+spec:
+  {{- if .Values.ingress.className }}
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- end }}
+  {{- if .Values.ingress.tls.enabled }}
+  tls:
+    - hosts:
+        {{- range .Values.ingress.hosts }}
+        - {{ .host | quote }}
+        {{- end }}
+      secretName: {{ include "nkudo.ingressTlsSecretName" . }}
+  {{- end }}
+  rules:
+    {{- range .Values.ingress.hosts }}
+    - host: {{ .host | quote }}
+      http:
+        paths:
+          {{- range .paths }}
+          - path: {{ .path }}
+            pathType: {{ .pathType }}
+            backend:
+              service:
+                name: {{ include "nkudo.fullname" $ }}
+                port:
+                  number: {{ $.Values.service.httpPort }}
+          {{- end }}
+    {{- end }}
+
+---
+{{- if .Values.ingress.grpc.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "nkudo.fullname" . }}-grpc
+  labels:
+    {{- include "nkudo.labels" . | nindent 4 }}
+    app.kubernetes.io/component: grpc
+  annotations:
+    {{- toYaml .Values.ingress.grpc.annotations | nindent 4 }}
+spec:
+  {{- if .Values.ingress.className }}
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- end }}
+  {{- if .Values.ingress.tls.enabled }}
+  tls:
+    - hosts:
+        {{- range .Values.ingress.grpc.hosts }}
+        - {{ .host | quote }}
+        {{- end }}
+      secretName: {{ include "nkudo.ingressGrpcTlsSecretName" . }}
+  {{- end }}
+  rules:
+    {{- range .Values.ingress.grpc.hosts }}
+    - host: {{ .host | quote }}
+      http:
+        paths:
+          {{- range .paths }}
+          - path: {{ .path }}
+            pathType: {{ .pathType }}
+            backend:
+              service:
+                name: {{ include "nkudo.fullname" $ }}
+                port:
+                  number: {{ $.Values.service.grpcPort }}
+          {{- end }}
+    {{- end }}
+{{- end }}
+{{- end }}

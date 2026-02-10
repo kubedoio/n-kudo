@@ -1,0 +1,22 @@
+apiVersion: v2
+name: nkudo
+description: A Helm chart for n-kudo control plane
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - nkudo
+  - control-plane
+  - vm
+  - microvm
+home: https://github.com/kubedoio/n-kudo
+sources:
+  - https://github.com/kubedoio/n-kudo
+maintainers:
+  - name: nkudo
+    email: maintainers@nkudo.io
+dependencies:
+  - name: postgresql
+    version: 13.x.x
+    repository: https://charts.bitnami.com/bitnami
+    condition: postgresql.enabled

@@ -1219,3 +1219,79 @@ func (m *MemoryRepo) ListAuditEvents(_ context.Context, tenantID string, limit i
 	}
 	return events, nil
 }
+
+// User authentication methods (stub implementations for testing)
+func (m *MemoryRepo) CreateUser(_ context.Context, user User) (User, error) { return user, nil }
+func (m *MemoryRepo) GetUserByEmail(_ context.Context, email string) (User, error) { return User{}, ErrNotFound }
+func (m *MemoryRepo) GetUserByEmailAndTenant(_ context.Context, email, tenantID string) (User, error) { return User{}, ErrNotFound }
+func (m *MemoryRepo) GetUserByID(_ context.Context, tenantID, userID string) (User, error) { return User{}, ErrNotFound }
+func (m *MemoryRepo) UpdateUserLastLogin(_ context.Context, tenantID, userID string) error { return nil }
+func (m *MemoryRepo) UpdateUserPassword(_ context.Context, tenantID, userID, passwordHash string) error { return nil }
+func (m *MemoryRepo) EmailExists(_ context.Context, email string) (bool, error) { return false, nil }
+func (m *MemoryRepo) CreateEmailVerificationToken(_ context.Context, userID, tenantID, tokenHash string, expiresAt time.Time) error { return nil }
+func (m *MemoryRepo) VerifyEmailToken(_ context.Context, tokenHash string) (userID, tenantID string, err error) { return "", "", ErrNotFound }
+func (m *MemoryRepo) MarkEmailVerified(_ context.Context, tenantID, userID string) error { return nil }
+func (m *MemoryRepo) ListTenants(_ context.Context) ([]Tenant, error) { return nil, nil }
+func (m *MemoryRepo) GetTenantByID(_ context.Context, tenantID string) (Tenant, error) { return Tenant{}, ErrNotFound }
+
+// Team invitation methods (stub implementations for testing)
+func (m *MemoryRepo) CreateInvitation(_ context.Context, invitation ProjectInvitation) error { return nil }
+func (m *MemoryRepo) GetInvitationByToken(_ context.Context, tokenHash string) (*ProjectInvitation, error) { return nil, ErrNotFound }
+func (m *MemoryRepo) ListPendingInvitations(_ context.Context, tenantID string) ([]ProjectInvitation, error) { return nil, nil }
+func (m *MemoryRepo) ListUserInvitations(_ context.Context, email string) ([]ProjectInvitationWithProject, error) { return nil, nil }
+func (m *MemoryRepo) AcceptInvitation(_ context.Context, invitationID, userID string) error { return nil }
+func (m *MemoryRepo) DeclineInvitation(_ context.Context, invitationID string) error { return nil }
+func (m *MemoryRepo) CancelInvitation(_ context.Context, tenantID, invitationID string) error { return nil }
+func (m *MemoryRepo) GetInvitationByID(_ context.Context, tenantID, invitationID string) (*ProjectInvitation, error) { return nil, ErrNotFound }
+
+
+// VXLAN network methods (stub implementations for testing)
+func (m *MemoryRepo) CreateVXLANNetwork(_ context.Context, tenantID, siteID string, network VXLANNetwork) (VXLANNetwork, error) {
+	return network, nil
+}
+func (m *MemoryRepo) ListVXLANNetworks(_ context.Context, tenantID, siteID string) ([]VXLANNetwork, error) {
+	return nil, nil
+}
+func (m *MemoryRepo) GetVXLANNetwork(_ context.Context, tenantID, networkID string) (VXLANNetwork, error) {
+	return VXLANNetwork{}, ErrNotFound
+}
+func (m *MemoryRepo) GetVXLANNetworkByVNI(_ context.Context, tenantID string, vni int) (VXLANNetwork, error) {
+	return VXLANNetwork{}, ErrNotFound
+}
+func (m *MemoryRepo) DeleteVXLANNetwork(_ context.Context, tenantID, networkID string) error {
+	return nil
+}
+func (m *MemoryRepo) VXLANNetworkBelongsToTenant(_ context.Context, networkID, tenantID string) (bool, error) {
+	return false, nil
+}
+
+// VXLAN tunnel methods (stub implementations for testing)
+func (m *MemoryRepo) CreateVXLANTunnel(_ context.Context, tunnel VXLANTunnel) (VXLANTunnel, error) {
+	return tunnel, nil
+}
+func (m *MemoryRepo) ListVXLANTunnels(_ context.Context, networkID string) ([]VXLANTunnel, error) {
+	return nil, nil
+}
+func (m *MemoryRepo) GetVXLANTunnel(_ context.Context, networkID, hostID string) (VXLANTunnel, error) {
+	return VXLANTunnel{}, ErrNotFound
+}
+func (m *MemoryRepo) UpdateVXLANTunnelStatus(_ context.Context, tunnelID string, status string) error {
+	return nil
+}
+func (m *MemoryRepo) DeleteVXLANTunnel(_ context.Context, tunnelID string) error {
+	return nil
+}
+
+// VM network attachment methods (stub implementations for testing)
+func (m *MemoryRepo) AttachVMToNetwork(_ context.Context, attachment VMNetworkAttachment) (VMNetworkAttachment, error) {
+	return attachment, nil
+}
+func (m *MemoryRepo) DetachVMFromNetwork(_ context.Context, vmID, networkID string) error {
+	return nil
+}
+func (m *MemoryRepo) ListVMNetworkAttachments(_ context.Context, vmID string) ([]VMNetworkAttachment, error) {
+	return nil, nil
+}
+func (m *MemoryRepo) ListNetworkVMAttachments(_ context.Context, networkID string) ([]VMNetworkAttachment, error) {
+	return nil, nil
+}
