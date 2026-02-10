@@ -84,7 +84,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Download binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: nkudo-edge-linux-${{ matrix.arch }}
           path: dist
@@ -130,7 +130,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Download binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: nkudo-edge-linux-${{ matrix.arch }}
           path: dist
@@ -166,7 +166,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           path: dist
           pattern: nkudo-edge-*
