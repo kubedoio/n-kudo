@@ -75,7 +75,7 @@ jobs:
           sha256sum ${{ matrix.binary }}-nightly.tar.gz > ${{ matrix.binary }}-nightly.tar.gz.sha256
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.binary }}-nightly
           path: |
