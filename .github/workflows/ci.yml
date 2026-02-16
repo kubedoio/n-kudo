@@ -88,7 +88,7 @@ jobs:
 
       - name: Upload coverage
         if: matrix.go-version == env.GO_VERSION
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v5
         with:
           files: ./coverage.out
           fail_ci_if_error: false
@@ -131,7 +131,7 @@ jobs:
         run: npm run build
 
       - name: Upload coverage
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v5
         with:
           files: ./frontend/coverage/coverage-final.json
           fail_ci_if_error: false
