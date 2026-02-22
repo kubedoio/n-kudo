@@ -36,8 +36,8 @@
                 "path": "img/screenshot-clock-options.png"
             }
         ],
-        "version": "3.2.1",
-        "updated": "2026-01-12"
+        "version": "3.2.2",
+        "updated": "2026-02-17"
     },
     "dependencies": {
         "grafanaDependency": ">=11.0.0",
