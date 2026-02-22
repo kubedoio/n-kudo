@@ -11,15 +11,17 @@ import {
     Settings,
     LogOut,
     Cloud,
-    Globe
+    Globe,
+    Palette
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 const navItems = [
     { icon: LayoutDashboard, label: 'Sites', href: '/sites' },
-    { icon: Globe, label: 'Hosts', href: '/hosts' },
+    // { icon: Globe, label: 'Hosts', href: '/hosts' }, // Not implemented yet
     { icon: Box, label: 'VMs', href: '/vms' },
     { icon: Activity, label: 'Executions', href: '/executions' },
+    { icon: Palette, label: 'Designer', href: '/designer' },
     { icon: Settings, label: 'Settings', href: '/settings' },
 ];
 

@@ -1,5 +1,37 @@
 import { z } from 'zod';
 
+// Template/Blueprint types
+export const TemplateSchema = z.object({
+    id: z.string(),
+    tenant_id: z.string(),
+    name: z.string(),
+    description: z.string().optional(),
+    version: z.string(),
+    nodes: z.array(z.any()), // DesignerNode array
+    edges: z.array(z.any()), // DesignerEdge array
+    created_at: z.string(),
+    updated_at: z.string(),
+});
+
+export type Template = z.infer<typeof TemplateSchema>;
+
+export const CreateTemplateRequestSchema = z.object({
+    name: z.string().min(1).max(100),
+    description: z.string().max(500).optional(),
+    nodes: z.array(z.any()), // DesignerNode[]
+    edges: z.array(z.any()), // DesignerEdge[]
+});
+
+export type CreateTemplateRequest = z.infer<typeof CreateTemplateRequestSchema>;
+
+export const DeployTemplateRequestSchema = z.object({
+    template_id: z.string(),
+    site_id: z.string(),
+    overrides: z.record(z.string(), z.any()).optional(), // Node property overrides
+});
+
+export type DeployTemplateRequest = z.infer<typeof DeployTemplateRequestSchema>;
+
 export const SiteSchema = z.object({
     id: z.string(),
     tenant_id: z.string(),
