@@ -22,7 +22,9 @@ const severityColor: Record<string, string> = {
 export default function ExecutionLogsViewer({ executionId }: ExecutionLogsViewerProps) {
     const [autoRefresh, setAutoRefresh] = useState(true)
     const [copied, setCopied] = useState(false)
-    const { data: logs, isLoading, refetch } = useExecutionLogs(executionId, autoRefresh)
+    const { data: logs, isLoading, refetch } = useExecutionLogs(executionId, undefined, {
+        refetchInterval: autoRefresh ? 2000 : false,
+    })
     const bottomRef = useRef<HTMLDivElement>(null)
 
     useEffect(() => {

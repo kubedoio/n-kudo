@@ -22,16 +22,19 @@ export default function AddSiteModal({ open, onClose, tenantId }: AddSiteModalPr
     const [name, setName] = useState('')
     const [externalKey, setExternalKey] = useState('')
     const [countryCode, setCountryCode] = useState('')
-    const createSite = useCreateSite(tenantId)
+    const createSite = useCreateSite()
 
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault()
         if (!name.trim() || !tenantId) return
         try {
             await createSite.mutateAsync({
-                name: name.trim(),
-                external_key: externalKey.trim() || undefined,
-                location_country_code: countryCode.trim() || undefined,
+                tenantId,
+                data: {
+                    name: name.trim(),
+                    external_key: externalKey.trim() || undefined,
+                    location_country_code: countryCode.trim() || undefined,
+                },
             })
             setName('')
             setExternalKey('')
@@ -43,7 +46,7 @@ export default function AddSiteModal({ open, onClose, tenantId }: AddSiteModalPr
     }
 
     return (
-        <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
+        <Dialog open={open} onOpenChange={(v: boolean) => !v && onClose()}>
             <DialogContent>
                 <DialogHeader>
                     <DialogTitle>Create Site</DialogTitle>

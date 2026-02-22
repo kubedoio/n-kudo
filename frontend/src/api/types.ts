@@ -45,6 +45,7 @@ export interface Host {
   storage_bytes_total: number;
   kvm_available: boolean;
   cloud_hypervisor_available: boolean;
+  netbird_ready: boolean;
   last_facts_at: string;
   agent_state: string;
 }
@@ -178,6 +179,8 @@ export interface PlanAction {
   name?: string;
   vcpu_count?: number;
   memory_mib?: number;
+  rootfs_path?: string;
+  bridge?: string;
 }
 
 // ============================================

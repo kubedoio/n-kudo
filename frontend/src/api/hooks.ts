@@ -389,6 +389,39 @@ export const useEnrollmentTokens = (
   });
 };
 
+export const useCreateEnrollmentToken = (
+  tenantId: string,
+  options?: UseMutationOptions<IssueEnrollmentTokenResponse, APIErrorResponse, { site_id: string; expires_in_seconds?: number }>
+) => {
+  const queryClient = useQueryClient();
+
+  return useMutation<IssueEnrollmentTokenResponse, APIErrorResponse, { site_id: string; expires_in_seconds?: number }>({
+    mutationFn: (vars) => issueToken(tenantId, vars.site_id, vars.expires_in_seconds),
+    onSuccess: (data, variables, context) => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.enrollmentTokens(tenantId) });
+      options?.onSuccess?.(data, variables, context, {} as never);
+    },
+    ...options,
+  });
+};
+
+export const useCreatePlan = (
+  siteId: string,
+  options?: UseMutationOptions<ApplyPlanResponse, APIErrorResponse, { idempotency_key: string; actions: PlanAction[] }>
+) => {
+  const queryClient = useQueryClient();
+
+  return useMutation<ApplyPlanResponse, APIErrorResponse, { idempotency_key: string; actions: PlanAction[] }>({
+    mutationFn: (vars) => applyPlan(siteId, vars),
+    onSuccess: (data, variables, context) => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.vms(siteId) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.hosts(siteId) });
+      options?.onSuccess?.(data, variables, context, {} as never);
+    },
+    ...options,
+  });
+};
+
 // ============================================
 // Plan Hooks
 // ============================================
@@ -545,7 +578,7 @@ export const useExecutions = (
 export const useExecutionLogs = (
   executionId: string,
   limit?: number,
-  options?: UseQueryOptions<ExecutionLog[], APIErrorResponse>
+  options?: Omit<UseQueryOptions<ExecutionLog[], APIErrorResponse>, 'queryKey' | 'queryFn'>
 ) => {
   return useQuery<ExecutionLog[], APIErrorResponse>({
     queryKey: [...queryKeys.executionLogs(executionId), { limit }],

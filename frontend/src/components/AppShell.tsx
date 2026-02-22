@@ -8,7 +8,6 @@ import {
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { TooltipProvider } from '@/components/ui/tooltip'
-import { cn } from '@/lib/utils'
 
 export default function AppShell() {
     const location = useLocation()

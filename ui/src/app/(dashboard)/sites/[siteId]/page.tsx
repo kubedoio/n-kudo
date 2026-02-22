@@ -1,6 +1,9 @@
 'use client';
 
 import { useState, use } from 'react';
+
+// Required for static export - re-export from server component wrapper
+export { generateStaticParams } from './params';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { authStore } from '@/store/auth';
 import {
