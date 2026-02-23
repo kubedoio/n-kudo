@@ -155,7 +155,7 @@ jobs:
           fi
 
       - name: Upload Playwright report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         if: always()
         with:
           name: playwright-report-${{ matrix.browser }}
@@ -163,7 +163,7 @@ jobs:
           retention-days: 7
 
       - name: Upload test results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         if: always()
         with:
           name: test-results-${{ matrix.browser }}
@@ -171,7 +171,7 @@ jobs:
           retention-days: 7
 
       - name: Upload screenshots on failure
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         if: failure()
         with:
           name: failure-screenshots-${{ matrix.browser }}
@@ -179,7 +179,7 @@ jobs:
           retention-days: 7
 
       - name: Upload videos on failure
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         if: failure()
         with:
           name: failure-videos-${{ matrix.browser }}

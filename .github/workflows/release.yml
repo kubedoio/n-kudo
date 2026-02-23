@@ -61,7 +61,7 @@ jobs:
           tar czf ${{ matrix.binary }}.tar.gz ${{ matrix.binary }}
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.binary }}
           path: dist/${{ matrix.binary }}.tar.gz
@@ -100,13 +100,13 @@ jobs:
           deployments/packaging/deb/build-deb.sh "$VERSION" "${{ matrix.arch }}"
 
       - name: Upload DEB artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: nkudo-edge-deb-${{ matrix.arch }}
           path: dist/*.deb
 
       - name: Upload DEB checksum
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: nkudo-edge-deb-${{ matrix.arch }}-sha256
           path: dist/*.deb.sha256
@@ -146,13 +146,13 @@ jobs:
           deployments/packaging/rpm/build-rpm.sh "$VERSION" "${{ matrix.arch }}"
 
       - name: Upload RPM artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: nkudo-edge-rpm-${{ matrix.arch }}
           path: dist/*.rpm
 
       - name: Upload RPM checksum
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: nkudo-edge-rpm-${{ matrix.arch }}-sha256
           path: dist/*.rpm.sha256
